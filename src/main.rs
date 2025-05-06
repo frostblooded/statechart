@@ -14,14 +14,45 @@ impl StatechartUpdateContext {
     }
 }
 
+trait StateBehavior {
+    fn internal_new() -> Self where Self: Sized;
+    fn update(&mut self, _context: &mut StatechartUpdateContext) {}
+    fn get_meta_data_mut(&mut self) -> &mut StateMetaData;
+    fn get_meta_data(&self) -> &StateMetaData;
+    fn init_meta_data(&mut self) {}
+
+    fn new() -> Self where Self: Sized {
+        let mut state = Self::internal_new();
+        state.init_meta_data();
+        state
+    }
+
+    fn transition<NewStateType: 'static>(&self, context: &mut StatechartUpdateContext) where Self: Sized {
+        let new_state_type_id = TypeId::of::<NewStateType>();
+        context.transitions.push(new_state_type_id);
+    }
+
+    fn apply_transition(&mut self, context: &StatechartUpdateContext) {
+        for transition_id in &context.transitions {
+            for idx in 0..self.get_meta_data().children.len() {
+                let type_id: TypeId = self.get_meta_data().children_type_ids[idx];
+
+                if type_id == *transition_id {
+                    self.get_meta_data_mut().active_child_idx = idx;
+                }
+            }
+        }
+    }
+}
+
 struct TimerStateChart {
-    root: Timer,
+    root: Box<dyn StateBehavior>,
 }
 
 impl TimerStateChart {
     fn new() -> Self {
         TimerStateChart {
-            root: Timer::new()
+            root: Box::new(Timer::new())
         }
     }
 
@@ -32,30 +63,42 @@ impl TimerStateChart {
     }
 
     fn handle_transitions(&mut self, context: StatechartUpdateContext) {
-        for transition_id in context.transitions {
-            for idx in 0..self.root.meta_data.children.len() {
-                let type_id: TypeId = self.root.meta_data.children_type_ids[idx];
-
-                if type_id == transition_id {
-                    self.root.meta_data.active_children_idx = vec![idx];
-                }
-            }
-        }
+        let root: &mut dyn StateBehavior = &mut *self.root;
+        root.apply_transition(&context);
     }
 }
 
-struct TimerMetaData {
-    children_type_ids: Vec<TypeId>,
-    children: Vec<Box<dyn StateBehavior>>,
-    active_children_idx: Vec<usize>
+struct Timer {
+    meta_data: StateMetaData,
 }
 
-impl TimerMetaData {
-    fn new() -> Self {
-        let default_state: Box<Timer_Running> = Box::new(Timer_Running::new());
+impl StateBehavior for Timer {
+    fn internal_new() -> Self
+    where
+        Self: Sized
+    {
+        Self {
+            meta_data: StateMetaData::new(),
+        }
+    }
 
+    fn update(&mut self, context: &mut StatechartUpdateContext) {
+        let active_child_idx: usize = self.meta_data.active_child_idx;
+        let active_child: &mut Box<dyn StateBehavior> = &mut self.meta_data.children[active_child_idx];
+        active_child.update(context);
+    }
+
+    fn get_meta_data_mut(&mut self) -> &mut StateMetaData {
+        &mut self.meta_data
+    }
+
+    fn get_meta_data(&self) -> &StateMetaData {
+        &self.meta_data
+    }
+
+    fn init_meta_data(&mut self) {
         let children: Vec<Box<dyn StateBehavior>> = vec![
-            default_state,
+            Box::new(Timer_Running::new()),
             Box::new(Timer_Elapsed::new()),
         ];
 
@@ -64,32 +107,45 @@ impl TimerMetaData {
             TypeId::of::<Timer_Elapsed>(),
         ];
 
-        TimerMetaData { children, active_children_idx: vec![0], children_type_ids }
+        self.meta_data = StateMetaData { children, active_child_idx: 0, children_type_ids };
     }
 }
 
-trait StateBehavior {
-    fn update(&mut self, _context: &mut StatechartUpdateContext) {}
+struct StateMetaData {
+    children_type_ids: Vec<TypeId>,
+    children: Vec<Box<dyn StateBehavior>>,
+    active_child_idx: usize,
+}
 
-    fn transition<NewStateType: 'static>(&self, context: &mut StatechartUpdateContext) where Self: Sized {
-        let new_state_type_id = TypeId::of::<NewStateType>();
-        context.transitions.push(new_state_type_id);
+impl StateMetaData {
+    fn new() -> Self {
+        StateMetaData {
+            children_type_ids: vec![],
+            children: vec![],
+            active_child_idx: 0,
+        }
     }
 }
 
 #[allow(non_camel_case_types)]
 struct Timer_Running {
+    meta_data: StateMetaData,
     duration: Duration,
     start_time: Instant,
 }
 
-impl Timer_Running {
-    fn new() -> Self {
-        Timer_Running { duration: Duration::from_secs(3), start_time: Instant::now() }
-    }
-}
-
 impl StateBehavior for Timer_Running {
+    fn internal_new() -> Self
+    where
+        Self: Sized
+    {
+        Self {
+            meta_data: StateMetaData::new(),
+            duration: Duration::from_secs(3),
+            start_time: Instant::now()
+        }
+    }
+
     fn update(&mut self, context: &mut StatechartUpdateContext) {
         let now: Instant = Instant::now();
         let elapsed_time: Duration = now.duration_since(self.start_time);
@@ -98,34 +154,37 @@ impl StateBehavior for Timer_Running {
             self.transition::<Timer_Elapsed>(context);
         }
     }
+
+    fn get_meta_data_mut(&mut self) -> &mut StateMetaData {
+        &mut self.meta_data
+    }
+
+    fn get_meta_data(&self) -> &StateMetaData {
+        &self.meta_data
+    }
 }
 
 #[allow(non_camel_case_types)]
-struct Timer_Elapsed {}
-
-impl Timer_Elapsed {
-    fn new() -> Self {
-        Timer_Elapsed {}
-    }
+struct Timer_Elapsed {
+    meta_data: StateMetaData,
 }
 
-impl StateBehavior for Timer_Elapsed {}
-
-struct Timer {
-    meta_data: TimerMetaData,
-}
-
-impl Timer {
-    fn new() -> Self {
-        Timer { meta_data: TimerMetaData::new() }
-    }
-}
-
-impl StateBehavior for Timer {
-    fn update(&mut self, context: &mut StatechartUpdateContext) {
-        for child_idx in &self.meta_data.active_children_idx {
-            self.meta_data.children[*child_idx].update(context);
+impl StateBehavior for Timer_Elapsed {
+    fn internal_new() -> Self
+    where
+        Self: Sized
+    {
+        Self {
+            meta_data: StateMetaData::new(),
         }
+    }
+
+    fn get_meta_data_mut(&mut self) -> &mut StateMetaData {
+        &mut self.meta_data
+    }
+
+    fn get_meta_data(&self) -> &StateMetaData {
+        &self.meta_data
     }
 }
 
@@ -135,7 +194,7 @@ fn main() {
     loop {
         thread::sleep(Duration::from_secs(1));
         statechart.update();
-        let root: &Timer = &statechart.root;
-        println!("Active states: {:?}", root.meta_data.active_children_idx)
+        let root: &dyn StateBehavior = &*statechart.root;
+        println!("Active state: {:?}", root.get_meta_data().active_child_idx)
     }
 }
