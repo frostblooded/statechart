@@ -6,6 +6,14 @@ struct StatechartUpdateContext {
     transitions: Vec<TypeId>
 }
 
+impl StatechartUpdateContext {
+    fn new() -> Self {
+        StatechartUpdateContext {
+            transitions: vec![]
+        }
+    }
+}
+
 struct TimerStateChart {
     root: Timer,
 }
@@ -18,9 +26,12 @@ impl TimerStateChart {
     }
 
     fn update(&mut self) {
-        let mut context: StatechartUpdateContext = StatechartUpdateContext { transitions: vec![] };
+        let mut context: StatechartUpdateContext = StatechartUpdateContext::new();
         self.root.update(&mut context);
+        self.handle_transitions(context);
+    }
 
+    fn handle_transitions(&mut self, context: StatechartUpdateContext) {
         for transition_id in context.transitions {
             for idx in 0..self.root.meta_data.children.len() {
                 let type_id: TypeId = self.root.meta_data.children_type_ids[idx];
@@ -59,7 +70,6 @@ impl TimerMetaData {
 
 trait StateBehavior {
     fn update(&mut self, _context: &mut StatechartUpdateContext) {}
-    fn new() -> Self where Self: Sized;
 
     fn transition<NewStateType: 'static>(&self, context: &mut StatechartUpdateContext) where Self: Sized {
         let new_state_type_id = TypeId::of::<NewStateType>();
@@ -67,14 +77,16 @@ trait StateBehavior {
     }
 }
 
-struct Timer {
-    meta_data: TimerMetaData,
-}
-
 #[allow(non_camel_case_types)]
 struct Timer_Running {
     duration: Duration,
     start_time: Instant,
+}
+
+impl Timer_Running {
+    fn new() -> Self {
+        Timer_Running { duration: Duration::from_secs(3), start_time: Instant::now() }
+    }
 }
 
 impl StateBehavior for Timer_Running {
@@ -86,24 +98,26 @@ impl StateBehavior for Timer_Running {
             self.transition::<Timer_Elapsed>(context);
         }
     }
-
-    fn new() -> Self
-    where
-        Self: Sized
-    {
-        Timer_Running { duration: Duration::from_secs(3), start_time: Instant::now() }
-    }
 }
 
 #[allow(non_camel_case_types)]
 struct Timer_Elapsed {}
 
-impl StateBehavior for Timer_Elapsed {
-    fn new() -> Self
-    where
-        Self: Sized
-    {
+impl Timer_Elapsed {
+    fn new() -> Self {
         Timer_Elapsed {}
+    }
+}
+
+impl StateBehavior for Timer_Elapsed {}
+
+struct Timer {
+    meta_data: TimerMetaData,
+}
+
+impl Timer {
+    fn new() -> Self {
+        Timer { meta_data: TimerMetaData::new() }
     }
 }
 
@@ -112,10 +126,6 @@ impl StateBehavior for Timer {
         for child_idx in &self.meta_data.active_children_idx {
             self.meta_data.children[*child_idx].update(context);
         }
-    }
-
-    fn new() -> Self {
-        Timer { meta_data: TimerMetaData::new() }
     }
 }
 
