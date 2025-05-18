@@ -1,21 +1,22 @@
-use crate::state_behavior::StateBehavior;
+use crate::state::State;
+use crate::state_trait::StateTrait;
 use crate::statechart_update_context::StatechartUpdateContext;
-use crate::timer_meta_data::TimerMetaData;
+use crate::timer_root::Timer_Root;
 
 pub struct Timer {
-    pub meta_data: TimerMetaData,
+    pub root: State,
 }
 
 impl Timer {
     pub fn new() -> Self {
-        Timer { meta_data: TimerMetaData::new() }
-    }
-}
-
-impl StateBehavior for Timer {
-    fn update(&mut self, context: &mut StatechartUpdateContext) {
-        for child_idx in &self.meta_data.active_children_idx {
-            self.meta_data.children[*child_idx].update(context);
+        Timer {
+            root: State::new::<Timer_Root>(),
         }
+    }
+
+    pub fn update(&mut self) {
+        let mut context: StatechartUpdateContext = StatechartUpdateContext::new();
+        self.root.update(&mut context);
+        self.root.handle_transitions(context);
     }
 }

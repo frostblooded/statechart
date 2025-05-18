@@ -1,12 +1,10 @@
-use crate::state_behavior::StateBehavior;
+use crate::custom_state_trait::CustomStateTrait;
 
 #[allow(non_camel_case_types)]
 pub struct Timer_Elapsed {}
 
-impl Timer_Elapsed {
-    pub fn new() -> Self {
-        Timer_Elapsed {}
+impl CustomStateTrait for Timer_Elapsed {
+    fn new() -> Self {
+        Self {}
     }
 }
-
-impl StateBehavior for Timer_Elapsed {}

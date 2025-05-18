@@ -1,23 +1,25 @@
 mod statechart_update_context;
-mod timer_state_chart;
-mod timer_meta_data;
-mod state_behavior;
+mod timer;
+mod state_meta_data;
 mod timer_running;
 mod timer_elapsed;
-mod timer;
+mod timer_root;
+mod state;
+mod state_trait;
+mod custom_state_trait;
 
-use crate::timer::Timer;
 use std::thread;
 use std::time::Duration;
-use timer_state_chart::TimerStateChart;
+use timer::Timer;
+use crate::state::State;
 
 fn main() {
-    let mut statechart: TimerStateChart = TimerStateChart::new();
+    let mut statechart: Timer = Timer::new();
 
     loop {
         thread::sleep(Duration::from_secs(1));
         statechart.update();
-        let root: &Timer = &statechart.root;
+        let root: &State = &statechart.root;
         println!("Active states: {:?}", root.meta_data.active_children_idx)
     }
 }
