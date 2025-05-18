@@ -1,8 +1,7 @@
-use std::any::TypeId;
 use crate::custom_state_trait::CustomStateTrait;
 use crate::state_meta_data::StateMetaData;
-use crate::state_trait::StateTrait;
 use crate::statechart_update_context::StatechartUpdateContext;
+use std::any::TypeId;
 
 pub struct State {
     pub(crate) meta_data: StateMetaData,
@@ -10,6 +9,21 @@ pub struct State {
 }
 
 impl State {
+    pub fn new<T: CustomStateTrait + 'static>() -> State {
+        let custom_state: Box<T> = Box::new(T::new());
+        let (children, children_type_ids): (Vec<State>, Vec<TypeId>) = T::get_children_and_type_ids();
+
+        Self {
+            meta_data: StateMetaData::new(children, children_type_ids),
+            custom_state,
+        }
+    }
+
+    pub fn update(&mut self, context: &mut StatechartUpdateContext) {
+        self.meta_data.update(context);
+        self.custom_state.update(context);
+    }
+
     pub fn handle_transitions(&mut self, context: StatechartUpdateContext) {
         for transition_id in context.transitions {
             for idx in 0..self.meta_data.children.len() {
@@ -20,21 +34,5 @@ impl State {
                 }
             }
         }
-    }
-}
-
-impl StateTrait for State {
-    fn new<T: CustomStateTrait + 'static>() -> State {
-        let custom_state: Box<T> = Box::new(T::new());
-        let children: Vec<Box<dyn StateTrait>> = T::get_children();
-
-        Self {
-            meta_data: StateMetaData::new(children),
-            custom_state,
-        }
-    }
-
-    fn update(&self, context: &mut StatechartUpdateContext) {
-        self.meta_data.update(context);
     }
 }

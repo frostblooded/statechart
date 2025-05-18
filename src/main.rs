@@ -5,7 +5,6 @@ mod timer_running;
 mod timer_elapsed;
 mod timer_root;
 mod state;
-mod state_trait;
 mod custom_state_trait;
 
 use std::thread;

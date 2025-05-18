@@ -1,5 +1,4 @@
 use crate::state::State;
-use crate::state_trait::StateTrait;
 use crate::statechart_update_context::StatechartUpdateContext;
 use crate::timer_root::Timer_Root;
 
