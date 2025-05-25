@@ -31,7 +31,7 @@ impl State {
                 let type_id: TypeId = self.meta_data.children_type_ids[idx];
 
                 if type_id == transition_id {
-                    self.meta_data.active_children_idx = vec![idx];
+                    self.meta_data.active_children_idx = Some(idx);
                 }
             }
         }
