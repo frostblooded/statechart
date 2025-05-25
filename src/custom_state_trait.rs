@@ -1,12 +1,12 @@
-use std::any::TypeId;
 use crate::state::State;
 use crate::statechart_update_context::StatechartUpdateContext;
+use std::any::Any;
 
-pub trait CustomStateTrait {
+pub trait CustomStateTrait : Any {
     fn new() -> Self where Self: Sized;
     fn update(&mut self, _context: &mut StatechartUpdateContext) {}
 
-    fn get_children_and_type_ids() -> (Vec<State>, Vec<TypeId>) where Self: Sized {
-        (vec![], vec![])
+    fn get_children() -> Vec<State> where Self: Sized {
+        vec![]
     }
 }

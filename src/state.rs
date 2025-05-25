@@ -11,7 +11,8 @@ pub struct State {
 impl State {
     pub fn new<T: CustomStateTrait + 'static>() -> State {
         let custom_state: Box<T> = Box::new(T::new());
-        let (children, children_type_ids): (Vec<State>, Vec<TypeId>) = T::get_children_and_type_ids();
+        let children: Vec<State> = T::get_children();
+        let children_type_ids: Vec<TypeId> = children.iter().map(|s| s.get_custom_state_type_id()).collect();
 
         Self {
             meta_data: StateMetaData::new(children, children_type_ids),
@@ -34,5 +35,9 @@ impl State {
                 }
             }
         }
+    }
+    
+    pub fn get_custom_state_type_id(&self) -> TypeId {
+        self.custom_state.type_id()
     }
 }
