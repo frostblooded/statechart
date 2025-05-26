@@ -1,3 +1,5 @@
+#![allow(non_camel_case_types)]
+
 pub mod statechart_update_context;
 pub mod state_meta_data;
 pub mod state;
