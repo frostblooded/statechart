@@ -1,21 +1,20 @@
+use crate::custom_state_trait::CustomStateTrait;
 use crate::state::State;
 use crate::statechart_update_context::StatechartUpdateContext;
-use crate::timer_root::Timer_Root;
 
-pub struct Timer {
-    pub root: State,
+pub struct Statechart {
+    root: State,
 }
 
-impl Timer {
-    pub fn new() -> Self {
-        Timer {
-            root: State::new::<Timer_Root>(),
+impl Statechart {
+    pub fn new<T: CustomStateTrait + 'static>() -> Statechart {
+        Self {
+            root: State::new::<T>(),
         }
     }
 
     pub fn update(&mut self) {
         let mut context: StatechartUpdateContext = StatechartUpdateContext::new();
         self.root.update(&mut context);
-        self.root.handle_transitions(context);
     }
 }

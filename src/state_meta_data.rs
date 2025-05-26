@@ -3,9 +3,9 @@ use crate::statechart_update_context::StatechartUpdateContext;
 use std::any::TypeId;
 
 pub struct StateMetaData {
-    pub children_type_ids: Vec<TypeId>,
-    pub children: Vec<State>,
-    pub active_children_idx: Option<usize>,
+    children_type_ids: Vec<TypeId>,
+    children: Vec<State>,
+    active_children_idx: Option<usize>,
 }
 
 impl StateMetaData {
@@ -15,9 +15,26 @@ impl StateMetaData {
     }
 
     pub fn update(&mut self, context: &mut StatechartUpdateContext) {
+        self.update_children(context);
+        self.apply_transitions(context);
+    }
+
+    fn update_children(&mut self, context: &mut StatechartUpdateContext) {
         if let Some(child_idx) = self.active_children_idx {
             if let Some(child) = self.children.get_mut(child_idx) {
                 child.update(context);
+            }
+        }
+    }
+
+    fn apply_transitions(&mut self, context: &StatechartUpdateContext) {
+        for transition_id in &context.transitions {
+            for idx in 0..self.children.len() {
+                let type_id: TypeId = self.children_type_ids[idx];
+
+                if type_id == *transition_id {
+                    self.active_children_idx = Some(idx);
+                }
             }
         }
     }

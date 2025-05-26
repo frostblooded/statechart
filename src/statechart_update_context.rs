@@ -1,13 +1,14 @@
 use std::any::TypeId;
 
+#[derive(Default)]
 pub struct StatechartUpdateContext {
-    pub transitions: Vec<TypeId>
+    pub(crate) transitions: Vec<TypeId>
 }
 
 impl StatechartUpdateContext {
     pub fn new() -> Self {
         StatechartUpdateContext {
-            transitions: vec![]
+            ..Default::default()
         }
     }
 
