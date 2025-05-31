@@ -1,8 +1,8 @@
-use std::any::TypeId;
+use crate::custom_state_trait::CustomStateTrait;
 
 #[derive(Default)]
 pub struct StatechartUpdateContext {
-    pub(crate) transitions: Vec<TypeId>
+    pub(crate) transitions: Vec<Box<dyn CustomStateTrait>>,
 }
 
 impl StatechartUpdateContext {
@@ -12,8 +12,7 @@ impl StatechartUpdateContext {
         }
     }
 
-    pub fn transition<NewCustomStateType: 'static>(&mut self) {
-        let new_custom_state_type_id = TypeId::of::<NewCustomStateType>();
-        self.transitions.push(new_custom_state_type_id);
+    pub fn transition(&mut self, new_custom_state: Box<dyn CustomStateTrait>) {
+        self.transitions.push(new_custom_state);
     }
 }
