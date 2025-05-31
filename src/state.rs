@@ -11,6 +11,7 @@ pub struct State {
 
 impl State {
     pub fn new(custom_state: Box<dyn CustomStateTrait>) -> State {
+        // TODO: Don't initialize these children that won't be used. Only keep meta data for child types.
         let children: Vec<State> = custom_state.get_children();
         let children_type_ids: Vec<TypeId> = children.iter().map(|s| s.get_custom_state_type_id()).collect();
         let active_child_idx: Option<usize> = if children.is_empty() { None } else { Some(0) };
@@ -34,6 +35,7 @@ impl State {
     }
 
     pub fn apply_transitions(&mut self, context: StatechartUpdateContext) {
+        // TODO: Properly handle trans-level transitions.
         for transition_custom_state in context.transitions {
             for idx in 0..self.children.len() {
                 let type_id: TypeId = self.children_type_ids[idx];

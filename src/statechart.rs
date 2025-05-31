@@ -3,12 +3,13 @@ use crate::custom_state_trait::CustomStateTrait;
 use crate::state::State;
 use crate::statechart_update_context::StatechartUpdateContext;
 
+// TODO: Implement triggers
 pub struct Statechart {
     root: State,
 }
 
 impl Statechart {
-    pub fn new<T: CustomStateTrait + 'static>(custom_state: Box<T>) -> Statechart {
+    pub fn new<T: CustomStateTrait>(custom_state: Box<T>) -> Statechart {
         Self {
             root: State::new(custom_state),
         }
@@ -23,4 +24,6 @@ impl Statechart {
     pub fn get_recursive_active_type_ids(&self) -> Vec<TypeId> {
         self.root.get_recursive_active_type_ids()
     }
+
+    // TODO: Implement better debug print with pretty state names
 }
