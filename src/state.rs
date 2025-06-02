@@ -1,6 +1,7 @@
 use crate::custom_state_trait::CustomStateTrait;
 use crate::statechart_update_context::StatechartUpdateContext;
 use std::any::TypeId;
+use std::fmt::Debug;
 use std::ops::DerefMut;
 
 pub struct State {
@@ -64,5 +65,15 @@ impl State {
         }
 
         vec![]
+    }
+}
+
+impl Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(child) = &self.child {
+            write!(f, "{:?} -> {:?}", self.custom_state, child)
+        } else {
+            write!(f, "{:?}", self.custom_state)
+        }
     }
 }

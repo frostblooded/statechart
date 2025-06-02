@@ -7,7 +7,7 @@ mod test_1
     use statechart::statechart::Statechart;
     use statechart::statechart_update_context::StatechartUpdateContext;
 
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct A {}
 
     impl CustomStateTrait for A {
@@ -23,7 +23,7 @@ mod test_1
         }
     }
 
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct A_A {}
 
     impl CustomStateTrait for A_A {
@@ -32,7 +32,7 @@ mod test_1
         }
     }
 
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct A_B {}
 
     impl CustomStateTrait for A_B {}
@@ -43,13 +43,21 @@ mod test_1
         statechart.update();
         assert_eq!(statechart.get_recursive_active_type_ids(), vec![TypeId::of::<A_B>()]);
     }
+
+    #[test]
+    fn test_debug_formatting() {
+        let mut statechart = Statechart::new(Box::new(A::default()));
+        assert_eq!(statechart.get_debug_name(), "A -> A_A");
+        statechart.update();
+        assert_eq!(statechart.get_debug_name(), "A -> A_B");
+    }
 }
 
 mod test_2 {
     use statechart::custom_state_trait::CustomStateTrait;
     use statechart::statechart::Statechart;
 
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct A {}
 
     impl CustomStateTrait for A {
@@ -58,7 +66,7 @@ mod test_2 {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct B {}
 
     impl CustomStateTrait for B {}

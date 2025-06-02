@@ -1,7 +1,8 @@
 use crate::statechart_update_context::StatechartUpdateContext;
 use std::any::{Any, TypeId};
+use std::fmt::Debug;
 
-pub trait CustomStateTrait : Any {
+pub trait CustomStateTrait : Any + Debug {
     fn update(&mut self, _context: &mut StatechartUpdateContext) {}
 
     fn get_possible_children_type_ids(&self) -> Vec<TypeId> {

@@ -1,4 +1,5 @@
 use std::any::TypeId;
+use std::fmt::{Debug, Formatter};
 use crate::custom_state_trait::CustomStateTrait;
 use crate::state::State;
 use crate::statechart_update_context::StatechartUpdateContext;
@@ -25,5 +26,13 @@ impl Statechart {
         self.root.get_recursive_active_type_ids()
     }
 
-    // TODO: Implement better debug print with pretty state names
+    pub fn get_debug_name(&self) -> String {
+        format!("{:?}", self.root)
+    }
+}
+
+impl Debug for Statechart {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+       write!(f, "{:?}", self.root)
+    }
 }
