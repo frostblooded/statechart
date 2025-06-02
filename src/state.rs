@@ -1,54 +1,46 @@
 use crate::custom_state_trait::CustomStateTrait;
 use crate::statechart_update_context::StatechartUpdateContext;
 use std::any::TypeId;
+use std::ops::DerefMut;
 
 pub struct State {
     children_type_ids: Vec<TypeId>,
-    children: Vec<State>,
-    active_child_idx: Option<usize>,
     custom_state: Box<dyn CustomStateTrait>,
+    child: Option<Box<State>>,
 }
 
 impl State {
     pub fn new(custom_state: Box<dyn CustomStateTrait>) -> State {
         // TODO: Don't initialize these children that won't be used. Only keep meta data for child types.
-        let children: Vec<State> = custom_state.get_children();
-        let children_type_ids: Vec<TypeId> = children.iter().map(|s| s.get_custom_state_type_id()).collect();
-        let active_child_idx: Option<usize> = if children.is_empty() { None } else { Some(0) };
+        let children_type_ids: Vec<TypeId> = custom_state.get_possible_children_type_ids();
+        let child: Option<Box<State>> = custom_state.get_initial_child().map(State::new).map(Box::new);
 
         Self {
-            children,
-            active_child_idx,
             children_type_ids,
             custom_state,
+            child
         }
     }
 
     pub fn update(&mut self, context: &mut StatechartUpdateContext) {
         self.custom_state.update(context);
 
-        if let Some(child_idx) = self.active_child_idx {
-            if let Some(child) = self.children.get_mut(child_idx) {
-                child.update(context);
-            }
+        if let Some(child) = &mut self.child {
+            child.deref_mut().update(context);
         }
     }
 
     pub fn apply_transitions(&mut self, context: StatechartUpdateContext) {
         // TODO: Properly handle trans-level transitions.
         for transition_custom_state in context.transitions {
-            for idx in 0..self.children.len() {
-                let type_id: TypeId = self.children_type_ids[idx];
-
+            for child_type_id in &self.children_type_ids {
                 let raw_custom_state_type_id: TypeId = {
                     let raw_custom_state: &dyn CustomStateTrait = transition_custom_state.as_ref();
                     raw_custom_state.type_id()
                 };
 
-                if type_id == raw_custom_state_type_id {
-                    self.children.clear();
-                    self.children.push(State::new(transition_custom_state));
-                    self.active_child_idx = Some(0);
+                if *child_type_id == raw_custom_state_type_id {
+                    self.child = Some(Box::new(State::new(transition_custom_state)));
                     break;
                 }
             }
@@ -61,12 +53,10 @@ impl State {
     }
 
     pub(crate) fn get_recursive_active_type_ids(&self) -> Vec<TypeId> {
-        if let Some(child_idx) = self.active_child_idx {
-            if let Some(child) = self.children.get(child_idx) {
-                let mut active_children_type_ids: Vec<TypeId> = child.get_recursive_active_type_ids();
-                active_children_type_ids.push(child.get_custom_state_type_id());
-                return active_children_type_ids;
-            }
+        if let Some(child) = &self.child {
+            let mut active_children_type_ids: Vec<TypeId> = child.get_recursive_active_type_ids();
+            active_children_type_ids.push(child.get_custom_state_type_id());
+            return active_children_type_ids;
         }
 
         vec![]

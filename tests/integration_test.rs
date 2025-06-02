@@ -2,7 +2,6 @@
 
 use std::any::TypeId;
 use statechart::custom_state_trait::CustomStateTrait;
-use statechart::state::State;
 use statechart::statechart::Statechart;
 use statechart::statechart_update_context::StatechartUpdateContext;
 
@@ -10,11 +9,15 @@ use statechart::statechart_update_context::StatechartUpdateContext;
 struct A {}
 
 impl CustomStateTrait for A {
-    fn get_children(&self) -> Vec<State> {
+    fn get_possible_children_type_ids(&self) -> Vec<TypeId> {
         vec![
-            State::new(Box::new(A_A::default())),
-            State::new(Box::new(A_B::default())),
+            TypeId::of::<A_A>(),
+            TypeId::of::<A_B>(),
         ]
+    }
+
+    fn get_initial_child(&self) -> Option<Box<dyn CustomStateTrait>> {
+        Some(Box::new(A_A::default()))
     }
 }
 
