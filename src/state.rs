@@ -4,19 +4,23 @@ use std::any::TypeId;
 use std::ops::DerefMut;
 
 pub struct State {
-    children_type_ids: Vec<TypeId>,
+    possible_children_type_ids: Vec<TypeId>,
     custom_state: Box<dyn CustomStateTrait>,
     child: Option<Box<State>>,
 }
 
 impl State {
     pub fn new(custom_state: Box<dyn CustomStateTrait>) -> State {
-        // TODO: Don't initialize these children that won't be used. Only keep meta data for child types.
-        let children_type_ids: Vec<TypeId> = custom_state.get_possible_children_type_ids();
+        let possible_children_type_ids: Vec<TypeId> = custom_state.get_possible_children_type_ids();
         let child: Option<Box<State>> = custom_state.get_initial_child().map(State::new).map(Box::new);
 
+        if let Some(c) = &child {
+            let child_type_id: TypeId = c.get_custom_state_type_id();
+            debug_assert!(possible_children_type_ids.contains(&child_type_id), "Initial child of state isn't a possible child for it");
+        }
+
         Self {
-            children_type_ids,
+            possible_children_type_ids,
             custom_state,
             child
         }
@@ -33,7 +37,7 @@ impl State {
     pub fn apply_transitions(&mut self, context: StatechartUpdateContext) {
         // TODO: Properly handle trans-level transitions.
         for transition_custom_state in context.transitions {
-            for child_type_id in &self.children_type_ids {
+            for child_type_id in &self.possible_children_type_ids {
                 let raw_custom_state_type_id: TypeId = {
                     let raw_custom_state: &dyn CustomStateTrait = transition_custom_state.as_ref();
                     raw_custom_state.type_id()
