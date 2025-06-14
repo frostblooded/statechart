@@ -27,6 +27,14 @@ impl State {
         }
     }
 
+    pub fn on_enter(&mut self) {
+        self.custom_state.on_enter();
+    }
+
+    pub fn on_exit(&mut self) {
+        self.custom_state.on_exit();
+    }
+
     pub fn update(&mut self, context: &mut StatechartUpdateContext) {
         self.custom_state.update(context);
 
@@ -37,14 +45,16 @@ impl State {
 
     pub fn apply_transitions(&mut self, context: StatechartUpdateContext) {
         // TODO: Properly handle trans-level transitions.
-        for transition_custom_state in context.transitions {
+        for mut transition_custom_state in context.transitions {
             for child_type_id in &self.possible_children_type_ids {
-                let raw_custom_state_type_id: TypeId = {
-                    let raw_custom_state: &dyn CustomStateTrait = transition_custom_state.as_ref();
-                    raw_custom_state.type_id()
-                };
+                let raw_custom_state_type_id: TypeId = transition_custom_state.as_ref().type_id();
 
                 if *child_type_id == raw_custom_state_type_id {
+                    if let Some(c) = &mut self.child {
+                        c.on_exit();
+                    }
+
+                    transition_custom_state.on_enter();
                     self.child = Some(Box::new(State::new(transition_custom_state)));
                     break;
                 }

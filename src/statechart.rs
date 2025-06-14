@@ -11,8 +11,11 @@ pub struct Statechart {
 
 impl Statechart {
     pub fn new<T: CustomStateTrait>(custom_state: Box<T>) -> Statechart {
+        let mut root: State = State::new(custom_state);
+        root.on_enter();
+
         Self {
-            root: State::new(custom_state),
+            root
         }
     }
 
