@@ -1,7 +1,10 @@
-use statechart::custom_state_trait::CustomStateTrait;
+use crate::timer::Timer;
+use statechart::prelude::*;
 
-#[allow(non_camel_case_types)]
+/// The countdown reached zero. Only `Reset` (handled by the root) leaves this state.
 #[derive(Debug, Default)]
-pub struct Timer_Elapsed {}
+pub struct Timer_Elapsed;
 
-impl CustomStateTrait for Timer_Elapsed {}
+impl State for Timer_Elapsed {
+    type Parent = Timer;
+}
