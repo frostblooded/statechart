@@ -1,21 +1,17 @@
 #![allow(non_camel_case_types)]
 
-mod test_1
-{
-    use std::any::TypeId;
+mod test_1 {
     use statechart::custom_state_trait::CustomStateTrait;
     use statechart::statechart::Statechart;
     use statechart::statechart_update_context::StatechartUpdateContext;
+    use std::any::TypeId;
 
     #[derive(Debug, Default)]
     struct A {}
 
     impl CustomStateTrait for A {
         fn get_possible_children_type_ids(&self) -> Vec<TypeId> {
-            vec![
-                TypeId::of::<A_A>(),
-                TypeId::of::<A_B>(),
-            ]
+            vec![TypeId::of::<A_A>(), TypeId::of::<A_B>()]
         }
 
         fn get_initial_child(&self) -> Option<Box<dyn CustomStateTrait>> {
@@ -41,7 +37,10 @@ mod test_1
     fn test_basic_transition() {
         let mut statechart = Statechart::new(Box::new(A::default()));
         statechart.update();
-        assert_eq!(statechart.get_recursive_active_type_ids(), vec![TypeId::of::<A_B>()]);
+        assert_eq!(
+            statechart.get_recursive_active_type_ids(),
+            vec![TypeId::of::<A_B>()]
+        );
     }
 
     #[test]
@@ -79,20 +78,20 @@ mod test_2 {
 }
 
 mod test_3 {
-    use std::any::TypeId;
-    use std::fmt::{Debug, Formatter};
     use statechart::custom_state_trait::CustomStateTrait;
     use statechart::statechart::Statechart;
     use statechart::statechart_update_context::StatechartUpdateContext;
+    use std::any::TypeId;
+    use std::fmt::{Debug, Formatter};
 
     struct A {
-        on_enter_called: bool
+        on_enter_called: bool,
     }
 
     impl A {
         fn construct() -> Self {
             Self {
-                on_enter_called: false
+                on_enter_called: false,
             }
         }
     }
@@ -103,10 +102,7 @@ mod test_3 {
         }
 
         fn get_possible_children_type_ids(&self) -> Vec<TypeId> {
-           vec![
-               TypeId::of::<A_A>(),
-               TypeId::of::<A_B>(),
-           ]
+            vec![TypeId::of::<A_A>(), TypeId::of::<A_B>()]
         }
 
         fn get_initial_child(&self) -> Option<Box<dyn CustomStateTrait>> {
@@ -130,13 +126,13 @@ mod test_3 {
     }
 
     struct A_B {
-        inner_on_enter_called: bool
+        inner_on_enter_called: bool,
     }
 
     impl A_B {
         fn construct() -> Self {
             Self {
-                inner_on_enter_called: false
+                inner_on_enter_called: false,
             }
         }
     }

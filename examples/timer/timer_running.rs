@@ -1,6 +1,6 @@
+use crate::timer_elapsed::Timer_Elapsed;
 use statechart::custom_state_trait::CustomStateTrait;
 use statechart::statechart_update_context::StatechartUpdateContext;
-use crate::timer_elapsed::Timer_Elapsed;
 use std::time::{Duration, Instant};
 
 #[allow(non_camel_case_types)]
@@ -12,7 +12,10 @@ pub struct Timer_Running {
 
 impl Timer_Running {
     pub fn new(duration: Duration) -> Self {
-        Timer_Running { duration, start_time: Instant::now() }
+        Timer_Running {
+            duration,
+            start_time: Instant::now(),
+        }
     }
 }
 
