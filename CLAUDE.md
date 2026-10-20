@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`statechart` is a Rust (edition 2024) library for hierarchical state machines (statecharts). It has no dependencies. A runnable countdown-timer example lives in `examples/timer/`.
+`statechart` is a Rust (edition 2024) library for hierarchical state machines (statecharts). It has no dependencies. Runnable examples live in `examples/`: ten graded ones, `01_toggle` (simplest) to `10_smart_home` (most of the API at once), plus a countdown timer in `examples/timer/`.
 
 ## Working rules
 
@@ -28,6 +28,7 @@ cargo test --test timer_test                 # one test file
 cargo test --doc                             # doctests only (crate example, rustdoc examples, compile_fail checks)
 cargo test --release --all-targets           # the always-on checks must also fire without debug assertions (D1)
 cargo run --example timer                    # runs forever, printing the active configuration each second; Ctrl-C to stop
+cargo run --example 01_toggle                # the graded examples 01_toggle .. 10_smart_home: a scripted run that prints and exits
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 cargo build && python3 scripts/check_compile_fail.py .   # optional: each compile_fail doctest fails with its listed error code (finds the build through `cargo metadata`, so CARGO_TARGET_DIR works)
@@ -53,6 +54,7 @@ Test files in `tests/` (shared helpers, such as the per-thread event log, are in
 | `panic_locations.rs` | panics about user mistakes point at the user's line (`#[track_caller]`), incl. duplicates listed by `region`, `child`, `child_with` and `child_explicit`; one test, because it swaps the panic hook |
 | `allocations.rs` | `update`, `trigger`, `is_active` and `state` do not allocate, nor do (once warmed up) `update` and `trigger` that apply transitions between zero-sized leaves (a counting global allocator, the only `unsafe` in the repo) |
 | `module_paths.rs` | the API through module paths only, and the prelude naming the same items |
+| `example_01_toggle.rs` .. `example_10_smart_home.rs` | the ten graded examples' states, loaded with `#[path]`, one file per example: 01 toggle (two states, one trigger), 02 traffic light (`update`, own data), 03 turnstile (trigger outputs, `NotHandled`), 04 door (`on_enter` / `on_exit`, `child_explicit`), 05 vending machine (nesting, `parent_mut`, `ancestor` / `ancestor_mut`), 06 media player (fallback to an ancestor), 07 elevator (four levels, `child_with`, transitions into inactive ancestors), 08 washing machine (parallel regions), 09 game character (three regions, `trigger_all`, cross-region `is_active` and `on_enter` requests), 10 smart home (nested parallel regions, hooks, `region_with`, introspection, root restart) |
 | `timer_test.rs` | the timer example's states, loaded with `#[path]`: incl. that Running answers `GetRemaining` itself (live value, not `Timer_Active`'s fallback), that `Pause` ticks once more, and that a zero duration elapses on the first `update`, not in `new` |
 
 ## Architecture
@@ -77,7 +79,7 @@ Users define states as plain structs implementing `state::State`; a struct's fie
 - State struct names are breadcrumbs of their ancestors: `Parent_Child_Grandchild`, e.g. `Timer_Active_Running` is `Running`, a child of `Active`, a child of the root `Timer`. Sibling names are never joined (`Timer_Active_Running` and `Timer_Active_Paused` are siblings; `Timer_Running_Paused` would be wrong). Hence `#![allow(non_camel_case_types)]` in `lib.rs`, tests and the example.
 - User code imports `use statechart::prelude::*;` (`State`, `NoParent`, `Definition`, `Context`, `ExitContext`, `Event`, `Trigger`, `NotHandled`, `Statechart`). Every item also stays reachable through its module path (`statechart::state::State`, `statechart::statechart::Statechart`, ...); the crate root re-exports nothing but the modules, and `tests/module_paths.rs` checks both.
 - One test file per area under `tests/` (see the table above); public items get rustdoc (`#![warn(missing_docs)]`) and implement `Debug` (`#![warn(missing_debug_implementations)]`; `Context` / `ExitContext` print the state's type and its parent's data, `Definition` / `Region` the state's type and counts), and compile-time checks get a `compile_fail,EXXXX` doctest in `src/`. When rustc reports a second code for the same mistake, the doctest lists only the main one and its `// error` line says `also reports EYYYY`, which `scripts/check_compile_fail.py` then expects too. Lints have no error code: the `#[must_use]` checks are plain `compile_fail` doctests with `# #![deny(unused_must_use)]` (rustdoc allows `unused` by default), which `scripts/check_compile_fail.py` skips.
-- `tests/timer_test.rs` pulls the example's state modules in with `#[path = "../examples/timer/..."]`, so changing the public API breaks that test until the example is updated too.
+- `tests/timer_test.rs` and `tests/example_*.rs` pull the examples' state modules in with `#[path = "../examples/..."]`, so changing the public API breaks those tests until the examples are updated too. Each example is a folder with `main.rs` (a scripted run that prints and exits), one file per state and `triggers.rs`; everything outside `main.rs` must be used by its test file too, or the test build warns about dead code (CI denies warnings).
 
 ## Agent skills
 
