@@ -1,7 +1,7 @@
+use crate::timer_root::Timer_Root;
+use statechart::statechart::Statechart;
 use std::fmt::{Debug, Formatter};
 use std::time::Duration;
-use statechart::statechart::Statechart;
-use crate::timer_root::Timer_Root;
 
 pub struct Timer {
     statechart: Statechart,

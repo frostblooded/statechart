@@ -13,17 +13,23 @@ pub struct State {
 impl State {
     pub fn new(custom_state: Box<dyn CustomStateTrait>) -> State {
         let possible_children_type_ids: Vec<TypeId> = custom_state.get_possible_children_type_ids();
-        let child: Option<Box<State>> = custom_state.get_initial_child().map(State::new).map(Box::new);
+        let child: Option<Box<State>> = custom_state
+            .get_initial_child()
+            .map(State::new)
+            .map(Box::new);
 
         if let Some(c) = &child {
             let child_type_id: TypeId = c.get_custom_state_type_id();
-            debug_assert!(possible_children_type_ids.contains(&child_type_id), "Initial child of state isn't a possible child for it");
+            debug_assert!(
+                possible_children_type_ids.contains(&child_type_id),
+                "Initial child of state isn't a possible child for it"
+            );
         }
 
         Self {
             possible_children_type_ids,
             custom_state,
-            child
+            child,
         }
     }
 

@@ -1,11 +1,11 @@
+use crate::timer::Timer;
 use std::thread;
 use std::time::Duration;
-use crate::timer::Timer;
 
 mod timer;
-mod timer_running;
 mod timer_elapsed;
 mod timer_root;
+mod timer_running;
 
 fn main() {
     let mut timer: Timer = Timer::new(Duration::from_secs(3));

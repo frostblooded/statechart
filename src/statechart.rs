@@ -1,8 +1,8 @@
-use std::any::TypeId;
-use std::fmt::{Debug, Formatter};
 use crate::custom_state_trait::CustomStateTrait;
 use crate::state::State;
 use crate::statechart_update_context::StatechartUpdateContext;
+use std::any::TypeId;
+use std::fmt::{Debug, Formatter};
 
 // TODO: Implement triggers
 pub struct Statechart {
@@ -14,9 +14,7 @@ impl Statechart {
         let mut root: State = State::new(custom_state);
         root.on_enter();
 
-        Self {
-            root
-        }
+        Self { root }
     }
 
     pub fn update(&mut self) {
@@ -36,6 +34,6 @@ impl Statechart {
 
 impl Debug for Statechart {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-       write!(f, "{:?}", self.root)
+        write!(f, "{:?}", self.root)
     }
 }

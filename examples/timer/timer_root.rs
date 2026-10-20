@@ -1,8 +1,8 @@
-use std::any::TypeId;
-use std::time::Duration;
-use statechart::custom_state_trait::CustomStateTrait;
 use crate::timer_elapsed::Timer_Elapsed;
 use crate::timer_running::Timer_Running;
+use statechart::custom_state_trait::CustomStateTrait;
+use std::any::TypeId;
+use std::time::Duration;
 
 #[allow(non_camel_case_types)]
 #[derive(Debug)]
@@ -18,10 +18,7 @@ impl Timer_Root {
 
 impl CustomStateTrait for Timer_Root {
     fn get_possible_children_type_ids(&self) -> Vec<TypeId> {
-        vec![
-            TypeId::of::<Timer_Running>(),
-            TypeId::of::<Timer_Elapsed>(),
-        ]
+        vec![TypeId::of::<Timer_Running>(), TypeId::of::<Timer_Elapsed>()]
     }
 
     fn get_initial_child(&self) -> Option<Box<dyn CustomStateTrait>> {
