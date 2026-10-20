@@ -1,6 +1,6 @@
 //! The [`Statechart`]: owns the active configuration and runs updates, triggers and transitions.
 
-use crate::engine::{Dispatch, Node, Registry, Runtime, Sink};
+use crate::engine::{Engine, Sink};
 use crate::state::{InChart, NoParent, State};
 use crate::trigger::{Event, NotHandled};
 use std::any::TypeId;
@@ -186,9 +186,7 @@ use std::marker::PhantomData;
 ///   [`ctx.ancestor()`](crate::context::Context::ancestor). See
 ///   [`Event`](crate::trigger::Event#triggers-cannot-borrow).
 pub struct Statechart<R> {
-    root: Node,
-    registry: Registry,
-    runtime: Runtime,
+    engine: Engine,
     _root: PhantomData<fn() -> R>,
 }
 
@@ -216,14 +214,8 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     ///
     /// A panic in a hook propagates (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn new(root: R) -> Self {
-        let registry = Registry::build::<R>();
-        let mut runtime = Runtime::default();
-        let mut root = registry.enter_root(&mut runtime, Box::new(root));
-        registry.run_batch(&mut runtime, &mut root);
         Statechart {
-            root,
-            registry,
-            runtime,
+            engine: Engine::new(root),
             _root: PhantomData,
         }
     }
@@ -246,10 +238,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     ///
     /// A panic in a hook propagates (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn update(&mut self) {
-        self.registry
-            .enter_pending_root(&mut self.runtime, &mut self.root);
-        self.registry.update_root(&mut self.runtime, &mut self.root);
-        self.registry.run_batch(&mut self.runtime, &mut self.root);
+        self.engine.update();
     }
 
     /// Fires a trigger and returns the output of the first handler that ran.
@@ -311,18 +300,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// Runs every eligible handler of `trigger` into `sink`, then applies the requested
     /// transitions.
     fn dispatch<E: Event>(&mut self, trigger: E, mut sink: Sink<E::Output>) -> Sink<E::Output> {
-        self.registry
-            .enter_pending_root(&mut self.runtime, &mut self.root);
-        self.registry.dispatch_root(
-            &mut self.runtime,
-            &mut self.root,
-            &mut Dispatch {
-                event_ty: TypeId::of::<E>(),
-                event: &trigger,
-                outputs: &mut sink,
-            },
-        );
-        self.registry.run_batch(&mut self.runtime, &mut self.root);
+        self.engine.dispatch(&trigger, &mut sink);
         sink
     }
 
@@ -359,7 +337,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// ```
     #[must_use]
     pub fn is_active<T: InChart<R>>(&self) -> bool {
-        self.runtime.is_live(TypeId::of::<T>())
+        self.engine.is_live(TypeId::of::<T>())
     }
 
     /// The data of the state `T`, if it is active. `T` must belong to this chart:
@@ -378,9 +356,9 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// ```
     #[must_use]
     pub fn state<T: InChart<R>>(&self) -> Option<&T> {
-        self.registry
-            .find_active(&self.root, TypeId::of::<T>())
-            .and_then(|node| node.state.as_any().downcast_ref())
+        self.engine
+            .state(TypeId::of::<T>())
+            .and_then(|state| state.as_any().downcast_ref())
     }
 
     /// The data of the state `T`, mutably, if it is active. Changing a state's data never
@@ -400,16 +378,16 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// ```
     #[must_use]
     pub fn state_mut<T: InChart<R>>(&mut self) -> Option<&mut T> {
-        self.registry
-            .find_active_mut(&mut self.root, TypeId::of::<T>())
-            .and_then(|node| node.state.as_any_mut().downcast_mut())
+        self.engine
+            .state_mut(TypeId::of::<T>())
+            .and_then(|state| state.as_any_mut().downcast_mut())
     }
 
     /// The root state's data.
     #[must_use]
     pub fn root(&self) -> &R {
-        self.root
-            .state
+        self.engine
+            .root()
             .as_any()
             .downcast_ref()
             .expect("the root node holds `R`")
@@ -418,8 +396,8 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// The root state's data, mutably.
     #[must_use]
     pub fn root_mut(&mut self) -> &mut R {
-        self.root
-            .state
+        self.engine
+            .root_mut()
             .as_any_mut()
             .downcast_mut()
             .expect("the root node holds `R`")
@@ -439,14 +417,12 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// `on_exit` runs in). For a single chain `A -> A_B -> A_B_C` this is `[A_B_C, A_B]`.
     #[must_use]
     pub fn get_recursive_active_type_ids(&self) -> Vec<TypeId> {
-        let mut out = Vec::new();
-        self.root.collect_descendant_types(&mut out);
-        out
+        self.engine.active_descendant_types()
     }
 }
 
 impl<R> Debug for Statechart<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.root)
+        write!(f, "{:?}", self.engine)
     }
 }

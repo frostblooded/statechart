@@ -54,7 +54,10 @@ fn is_live<T: 'static>(engine: &Engine) -> bool {
 #[test]
 fn new_enters_the_root_and_its_initial_children() {
     let engine = Engine::new(Root);
-    assert_eq!(format!("{engine:?}"), "Root -> Root_A { leave_on_update: false }");
+    assert_eq!(
+        format!("{engine:?}"),
+        "Root -> Root_A { leave_on_update: false }"
+    );
     assert!(is_live::<Root>(&engine));
     assert!(is_live::<Root_A>(&engine));
     assert!(!is_live::<Root_B>(&engine));
@@ -95,8 +98,5 @@ fn queries_see_the_active_configuration() {
     assert!(engine.root().as_any().is::<Root>());
     assert!(engine.state(TypeId::of::<Root_A>()).is_some());
     assert!(engine.state(TypeId::of::<Root_B>()).is_none());
-    assert_eq!(
-        engine.active_descendant_types(),
-        [TypeId::of::<Root_A>()]
-    );
+    assert_eq!(engine.active_descendant_types(), [TypeId::of::<Root_A>()]);
 }
