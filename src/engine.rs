@@ -124,10 +124,18 @@ pub(crate) struct Request {
 pub(crate) struct Runtime {
     /// Requests of the current traversal or transition, in request order.
     pub(crate) requests: Vec<Request>,
+    /// The requests of the batch being applied. Kept between batches (empty) so that applying
+    /// transitions does not allocate once the buffer has grown to its working size.
+    queue: VecDeque<Request>,
     /// Active state types and their instance ids. A state is live from just before its
     /// `on_enter` until just after its `on_exit`.
     live: HashMap<TypeId, u64>,
     next_id: u64,
+    /// Set while a restart runs the old root's own `on_exit`: the new root is already in the
+    /// tree (and live), but its `on_enter` has not run. If that `on_exit` panics, the flag stays
+    /// set and the next operation enters the new root before anything else runs on it
+    /// ([`Registry::enter_pending_root`]).
+    root_pending_enter: bool,
 }
 
 impl Runtime {
@@ -147,6 +155,9 @@ impl Runtime {
     }
 
     fn deactivate(&mut self, ty: TypeId, id: u64) {
+        // Each state type appears once in a chart, but not each instance: during a restart the
+        // new root is live (same type, new id) before the old root's `on_exit`, and the old
+        // root must not remove the new root's entry.
         if self.is_live_instance(ty, id) {
             self.live.remove(&ty);
         }
@@ -408,10 +419,11 @@ impl<'t> Towards<'t> {
 /// Re-synchronises the live set with the tree if a batch is interrupted by a panic in a hook.
 ///
 /// Every state in the tree has been entered (at least partly) and not exited, because a state
-/// is placed in the tree when it is entered and detached before it is exited. But a state whose
-/// exit was interrupted, or a detached descendant that was never exited, may still be in the
-/// live set. Rebuilding the live set from the tree runs no user code, so it is safe during
-/// unwinding.
+/// is placed in the tree when it is entered and detached before it is exited. The one exception
+/// is a new root whose predecessor's `on_exit` panicked during a restart: it is in the tree but
+/// not entered yet, and [`Runtime::root_pending_enter`] says so. A state whose exit was
+/// interrupted, or a detached descendant that was never exited, may still be in the live set.
+/// Rebuilding the live set from the tree runs no user code, so it is safe during unwinding.
 struct ResyncOnUnwind<'a> {
     reg: &'a Registry,
     rt: &'a mut Runtime,
@@ -620,8 +632,39 @@ impl Registry {
         guard.armed = false;
     }
 
+    /// Finishes a restart that a panic in the old root's own `on_exit` interrupted: the new
+    /// root is in the tree but not entered yet. Enters it (its `on_enter`, then its initial
+    /// descendants) and applies the transitions their `on_enter` hooks request, as a batch of
+    /// its own. Does nothing otherwise. Every public operation calls this first, so `update`,
+    /// trigger handlers and `on_exit` never run on a root whose `on_enter` has not run.
+    pub(crate) fn enter_pending_root(&self, rt: &mut Runtime, root: &mut Node) {
+        if !rt.root_pending_enter {
+            return;
+        }
+        rt.requests.clear();
+        let mut guard = ResyncOnUnwind {
+            reg: self,
+            rt,
+            root,
+            armed: true,
+        };
+        self.enter_placed_root(guard.rt, guard.root);
+        self.apply_all(guard.rt, guard.root);
+        guard.armed = false;
+    }
+
+    /// Enters the root, which is already in the tree. From here on it counts as entered, even
+    /// if its `on_enter` panics.
+    fn enter_placed_root(&self, rt: &mut Runtime, root: &mut Node) {
+        rt.root_pending_enter = false;
+        self.enter_placed(rt, &mut Nil, root, Towards::nowhere(&mut None));
+    }
+
     fn apply_all(&self, rt: &mut Runtime, root: &mut Node) {
-        let mut queue: VecDeque<Request> = std::mem::take(&mut rt.requests).into();
+        // A panic drops the taken queue with the rest of the batch; the next batch then starts
+        // with a fresh buffer.
+        let mut queue = std::mem::take(&mut rt.queue);
+        queue.extend(rt.requests.drain(..));
         let mut applied = 0usize;
         while let Some(request) = queue.pop_front() {
             // Spec item 10: drop requests made by a state exited earlier in this batch.
@@ -640,6 +683,7 @@ impl Registry {
             self.apply(rt, root, request);
             queue.extend(rt.requests.drain(..));
         }
+        rt.queue = queue;
     }
 
     fn apply(&self, rt: &mut Runtime, root: &mut Node, request: Request) {
@@ -670,7 +714,9 @@ impl Registry {
     /// Exits the whole chart and enters `new_root` with its initial descendants.
     ///
     /// The root slot is never vacant: the new root takes the old one's place once the old
-    /// root's descendants are exited, just before the old root's own `on_exit`.
+    /// root's descendants are exited, just before the old root's own `on_exit`. Until its own
+    /// `on_enter` starts it is marked as not entered yet ([`Runtime::root_pending_enter`]), so
+    /// if the old root's `on_exit` panics, the next operation enters it first.
     fn restart(&self, rt: &mut Runtime, root: &mut Node, new_root: Box<dyn ErasedState>) {
         {
             let Node { state, regions, .. } = &mut *root;
@@ -683,8 +729,9 @@ impl Registry {
             }
         }
         let old = std::mem::replace(root, self.place(rt, 0, new_root));
+        rt.root_pending_enter = true;
         self.exit_detached(rt, old, &mut Nil);
-        self.enter_placed(rt, &mut Nil, root, Towards::nowhere(&mut None));
+        self.enter_placed_root(rt, root);
     }
 
     /// Walks down `descend` (active states below `node`), then replaces the active subtree of

@@ -90,6 +90,14 @@ use std::marker::PhantomData;
 ///   to an ancestor) enters it again. A restart (a transition to the root type) never leaves
 ///   the chart without a root: the old root stays until its descendants are exited, then the
 ///   new root takes its place.
+/// * If that old root's own `on_exit` panics, the new root is already in place but **not
+///   entered yet**: it is the active root ([`root`](Self::root) returns it,
+///   [`is_active`](Self::is_active) is `true`), its regions are empty, and its `on_enter` has
+///   not run. The next [`update`](Self::update), [`trigger`](Self::trigger) or
+///   [`trigger_all`](Self::trigger_all) first enters it (its `on_enter`, its initial
+///   descendants, then the transitions their `on_enter` hooks request) and only then does its
+///   own work. So `update`, trigger handlers and `on_exit` never run on a state whose
+///   `on_enter` has not run.
 ///
 /// Either way [`is_active`](Self::is_active), [`state`](Self::state) and the `Debug` output
 /// agree, no state's `on_exit` runs twice, and requests made by the remaining states are
@@ -101,6 +109,12 @@ use std::marker::PhantomData;
 ///   `Box<dyn ...>` without a `Send` bound. Keep a chart on the thread that created it.
 /// * Hooks cannot fire triggers (there are no internal events); they request transitions.
 /// * States are `'static` (they cannot borrow), because they are stored as `dyn Any`.
+/// * Triggers and their outputs are `'static` too (a trigger cannot carry `&str` or
+///   `&mut World`), because they are passed to the handlers type-erased, and `update` takes no
+///   input. Pass per-call data as owned trigger fields, or write it into the root with
+///   [`root_mut`](Self::root_mut) before [`update`](Self::update) and read it in the hooks with
+///   [`ctx.ancestor()`](crate::context::Context::ancestor). See
+///   [`Event`](crate::trigger::Event#triggers-cannot-borrow).
 pub struct Statechart<R> {
     root: Node,
     registry: Registry,
@@ -155,6 +169,8 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// not list ([`Context::transition`](crate::context::Context::transition)). A panic in a hook
     /// propagates (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn update(&mut self) {
+        self.registry
+            .enter_pending_root(&mut self.runtime, &mut self.root);
         self.runtime.requests.clear();
         self.registry
             .update_node(&mut self.runtime, &mut self.root, &mut Nil);
@@ -214,6 +230,8 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// Runs every eligible handler of `trigger` into `sink`, then applies the requested
     /// transitions.
     fn dispatch<E: Event>(&mut self, trigger: E, mut sink: Sink<E::Output>) -> Sink<E::Output> {
+        self.registry
+            .enter_pending_root(&mut self.runtime, &mut self.root);
         self.runtime.requests.clear();
         self.registry.dispatch(
             &mut self.runtime,
@@ -268,7 +286,20 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     }
 
     /// The data of the state `T`, mutably, if it is active. Changing a state's data never
-    /// changes which states are active.
+    /// changes which states are active. `T` must belong to this chart:
+    ///
+    /// ```compile_fail,E0277
+    /// # #![allow(non_camel_case_types)]
+    /// # use statechart::prelude::*;
+    /// #[derive(Debug)] struct Timer;
+    /// #[derive(Debug)] struct Door;
+    /// #[derive(Debug, Default)] struct Door_Open;
+    /// impl State for Timer { type Parent = NoParent; }
+    /// impl State for Door { type Parent = NoParent; fn define(d: &mut Definition<Self>) { d.region::<Door_Open>(); } }
+    /// impl State for Door_Open { type Parent = Door; }
+    /// let mut chart = Statechart::new(Timer);
+    /// chart.state_mut::<Door_Open>(); // error: `Door_Open` belongs to the `Door` chart
+    /// ```
     pub fn state_mut<T: InChart<R>>(&mut self) -> Option<&mut T> {
         self.registry
             .find_active_mut(&mut self.root, TypeId::of::<T>())

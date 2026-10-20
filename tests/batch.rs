@@ -397,3 +397,121 @@ fn on_enter_requests_made_while_building_the_chart_apply_before_new_returns() {
     );
     assert_eq!(chart.get_debug_name(), "Root -> Root_Ready");
 }
+
+mod later_regions {
+    use super::*;
+
+    // Root -> Root_A
+    //         ├── region 0: Root_A_X (initial), Root_A_Y
+    //         └── region 1: Root_A_P (initial)
+    //
+    // Root_A_X's on_enter requests Root_A_Y. Root_A_P (the later region) checks in its on_enter
+    // that the request has not been applied yet. Root handles `Again` (-> Root_A, which
+    // re-enters both regions).
+
+    pub struct Again;
+    impl Event for Again {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Root;
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>();
+            def.trigger::<Again>();
+        }
+    }
+    impl Trigger<Again> for Root {
+        fn handle(&mut self, _: &Again, ctx: &mut Context<Self>) {
+            ctx.transition(Root_A);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A_X>().child::<Root_A_Y>();
+            def.region::<Root_A_P>();
+        }
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A_X;
+    impl State for Root_A_X {
+        type Parent = Root_A;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            log("enter", "Root_A_X");
+            ctx.transition(Root_A_Y);
+        }
+        fn on_exit(&mut self, _: &mut ExitContext<Self>) {
+            log("exit", "Root_A_X");
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A_Y;
+    impl State for Root_A_Y {
+        type Parent = Root_A;
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A_P;
+    impl State for Root_A_P {
+        type Parent = Root_A;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            assert!(
+                ctx.is_active::<Root_A_X>() && !ctx.is_active::<Root_A_Y>(),
+                "Root_A_X's request was applied before the later region was entered"
+            );
+            log("enter", "Root_A_P");
+        }
+        fn on_exit(&mut self, _: &mut ExitContext<Self>) {
+            log("exit", "Root_A_P");
+        }
+    }
+
+    pub const ENTERED: [&str; 5] = [
+        "enter Root_A",
+        "enter Root_A_X",
+        "enter Root_A_P",
+        "exit Root_A_X",
+        "enter Root_A_Y",
+    ];
+}
+
+#[test]
+fn an_on_enter_request_waits_for_later_regions_while_building_the_chart() {
+    use later_regions::*;
+    let chart = Statechart::new(Root);
+    assert_eq!(take_log(), ENTERED);
+    assert_eq!(
+        chart.get_debug_name(),
+        "Root -> Root_A -> [Root_A_Y, Root_A_P]"
+    );
+}
+
+#[test]
+fn an_on_enter_request_waits_for_later_regions_during_a_transition() {
+    use later_regions::*;
+    let mut chart = Statechart::new(Root);
+    take_log();
+    chart.trigger(Again).unwrap();
+    assert_eq!(
+        take_log(),
+        [
+            &["exit Root_A_Y", "exit Root_A_P", "exit Root_A"][..],
+            &ENTERED
+        ]
+        .concat()
+    );
+    assert_eq!(
+        chart.get_debug_name(),
+        "Root -> Root_A -> [Root_A_Y, Root_A_P]"
+    );
+}

@@ -397,3 +397,94 @@ fn a_deep_state_can_transition_to_a_shallow_target_that_carries_data() {
     assert!(!chart.is_active::<Game_Play_Boss>());
     assert_eq!(chart.state::<Game_Over>().unwrap().score, 21);
 }
+
+mod restart {
+    use super::*;
+
+    // Root { generation } -> Root_A (initial) | Root_B
+    //
+    // Root handles `Restart` (-> a new root with the next generation) and `GoB` (-> Root_B).
+    // Root's `on_enter` logs whether it counts as active; Root_A's `on_exit` logs which root
+    // generation its parent is.
+
+    pub struct Restart;
+    impl Event for Restart {
+        type Output = ();
+    }
+
+    pub struct GoB;
+    impl Event for GoB {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Root {
+        pub generation: u32,
+    }
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>().child::<Root_B>();
+            def.trigger::<Restart>().trigger::<GoB>();
+        }
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            common::log(
+                "enter",
+                &format!(
+                    "Root {} (active: {})",
+                    self.generation,
+                    ctx.is_active::<Root>()
+                ),
+            );
+        }
+    }
+    impl Trigger<Restart> for Root {
+        fn handle(&mut self, _: &Restart, ctx: &mut Context<Self>) {
+            ctx.transition(Root {
+                generation: self.generation + 1,
+            });
+        }
+    }
+    impl Trigger<GoB> for Root {
+        fn handle(&mut self, _: &GoB, ctx: &mut Context<Self>) {
+            ctx.transition(Root_B);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        fn on_exit(&mut self, ctx: &mut ExitContext<Self>) {
+            common::log(
+                "exit",
+                &format!("Root_A (parent generation {})", ctx.parent().generation),
+            );
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_B;
+    impl State for Root_B {
+        type Parent = Root;
+    }
+}
+
+#[test]
+fn after_a_restart_the_new_root_is_active_and_its_requests_apply() {
+    use restart::*;
+    let mut chart = Statechart::new(Root { generation: 0 });
+    take_log_without_updates();
+    chart.trigger(Restart).unwrap();
+    // The old root's descendants are exited under the old root, and the new root is live.
+    assert_eq!(
+        take_log_without_updates(),
+        [
+            "exit Root_A (parent generation 0)",
+            "enter Root 1 (active: true)"
+        ]
+    );
+    assert!(chart.is_active::<Root>());
+    chart.trigger(GoB).unwrap();
+    assert_eq!(chart.get_debug_name(), "Root { generation: 1 } -> Root_B");
+}

@@ -280,8 +280,9 @@
 //! # Limitations
 //!
 //! A [`Statechart`](statechart::Statechart) is neither `Send` nor `Sync`, hooks cannot fire
-//! triggers (there are no internal events), and states are `'static`. See
-//! [Limitations](statechart::Statechart#limitations).
+//! triggers (there are no internal events), and states, triggers and trigger outputs are
+//! `'static` (they cannot borrow; pass data in as owned trigger fields or through the root's
+//! data). See [Limitations](statechart::Statechart#limitations).
 //!
 //! # Imports
 //!

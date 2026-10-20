@@ -12,7 +12,7 @@
 
 use crate::context::{Context, ExitContext};
 use crate::definition::Definition;
-use std::any::{Any, TypeId, type_name};
+use std::any::Any;
 use std::fmt::Debug;
 
 /// A state of a statechart. The struct's fields are the state's data.
@@ -103,10 +103,61 @@ pub trait State: Any + Debug + Sized {
 #[derive(Debug)]
 pub enum NoParent {}
 
+/// Crate-private supertraits and helpers of the public traits. Code outside the crate can
+/// neither name nor implement them, and cannot run their methods, not even through a
+/// `ParentSlot` bound:
+///
+/// ```compile_fail,E0576
+/// # use statechart::prelude::*;
+/// use statechart::state::ParentSlot;
+/// #[derive(Debug)]
+/// struct Door;
+/// impl State for Door {
+///     type Parent = NoParent;
+/// }
+/// <Door as ParentSlot>::unlisted_link(&|_: std::any::TypeId| false); // error: not in `ParentSlot`
+/// ```
+///
+/// ```compile_fail,E0308
+/// use statechart::state::ParentSlot;
+/// fn leak<T: ParentSlot>() {
+///     T::unlisted_link(&|_: std::any::TypeId| false); // error: only the crate can build the argument
+/// }
+/// ```
 pub(crate) mod sealed {
-    pub trait Sealed {}
-    impl Sealed for super::NoParent {}
-    impl<P: super::State> Sealed for P {}
+    use super::{NoParent, State};
+    use std::any::{TypeId, type_name};
+
+    /// Which state types the chart registered. Only the crate can build one, so code outside
+    /// it cannot run [`Sealed::unlisted_link`].
+    #[derive(Clone, Copy)]
+    pub struct Registered<'a>(pub(crate) &'a dyn Fn(TypeId) -> bool);
+
+    /// The supertrait of [`ParentSlot`](super::ParentSlot), implemented for `NoParent` and
+    /// every state.
+    pub trait Sealed {
+        /// For a panic message: if `Self` is a state that is not registered, the highest
+        /// unregistered state on the way up from `Self` and its (registered) parent.
+        fn unlisted_link(registered: Registered<'_>) -> Option<(&'static str, &'static str)>;
+    }
+
+    impl Sealed for NoParent {
+        fn unlisted_link(_: Registered<'_>) -> Option<(&'static str, &'static str)> {
+            None
+        }
+    }
+
+    impl<P: State> Sealed for P {
+        fn unlisted_link(registered: Registered<'_>) -> Option<(&'static str, &'static str)> {
+            if (registered.0)(TypeId::of::<P>()) {
+                return None;
+            }
+            Some(
+                <P::Parent as Sealed>::unlisted_link(registered)
+                    .unwrap_or((type_name::<P>(), type_name::<P::Parent>())),
+            )
+        }
+    }
 
     /// A parent with data, that is, any state: the bound of `parent()` / `parent_mut()`. Its
     /// own trait (instead of `State`) so that the root's missing `parent()` gets its own
@@ -139,37 +190,14 @@ pub trait ParentSlot: sealed::Sealed + 'static {
     /// The root of the chart that a state with this parent belongs to.
     #[doc(hidden)]
     type RootOf<Child: State>: State;
-
-    /// For a panic message: if `Self` is a state that is not registered, the highest
-    /// unregistered state on the way up from `Self` and its (registered) parent.
-    #[doc(hidden)]
-    fn unlisted_link(
-        is_registered: &dyn Fn(TypeId) -> bool,
-    ) -> Option<(&'static str, &'static str)>;
 }
 
 impl ParentSlot for NoParent {
     type RootOf<Child: State> = Child;
-
-    fn unlisted_link(_: &dyn Fn(TypeId) -> bool) -> Option<(&'static str, &'static str)> {
-        None
-    }
 }
 
 impl<P: State> ParentSlot for P {
     type RootOf<Child: State> = <P::Parent as ParentSlot>::RootOf<P>;
-
-    fn unlisted_link(
-        is_registered: &dyn Fn(TypeId) -> bool,
-    ) -> Option<(&'static str, &'static str)> {
-        if is_registered(TypeId::of::<P>()) {
-            return None;
-        }
-        Some(
-            P::Parent::unlisted_link(is_registered)
-                .unwrap_or((type_name::<P>(), type_name::<P::Parent>())),
-        )
-    }
 }
 
 /// The root state type of the chart `S` belongs to, computed from the `Parent` chain.
@@ -179,10 +207,31 @@ pub type RootOf<S> = <<S as State>::Parent as ParentSlot>::RootOf<S>;
 ///
 /// Used to reject, at compile time, transitions to states of another chart and queries such as
 /// [`Statechart::is_active`](crate::statechart::Statechart::is_active) for foreign states.
+///
+/// A state of another chart is reported as such ("this state belongs to the statechart rooted
+/// at ..."). Anything else, such as a boxed state (`ctx.transition(Box::new(..))`) or a type
+/// that is not a state at all, gets this trait's own message:
+///
+/// ```compile_fail,E0277
+/// # #![allow(non_camel_case_types)]
+/// # use statechart::prelude::*;
+/// # #[derive(Debug)] struct Door;
+/// # impl State for Door { type Parent = NoParent; fn define(d: &mut Definition<Self>) { d.region::<Door_Closed>().child::<Door_Open>(); } }
+/// # #[derive(Debug, Default)] struct Door_Open;
+/// # impl State for Door_Open { type Parent = Door; }
+/// #[derive(Debug, Default)]
+/// struct Door_Closed;
+/// impl State for Door_Closed {
+///     type Parent = Door;
+///     fn update(&mut self, ctx: &mut Context<Self>) {
+///         ctx.transition(Box::new(Door_Open)); // error: pass the state by value
+///     }
+/// }
+/// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a state of the statechart rooted at `{R}`",
-    label = "`{Self}` belongs to a different statechart",
-    note = "following `type Parent` up from `{Self}` must end at `{R}`"
+    label = "not a state type of this chart",
+    note = "the chart only accepts its own state types: types that implement `State` and whose `type Parent` chain ends at `{R}`; pass a state by value (`ctx.transition(Target {{ .. }})`), not boxed or by reference"
 )]
 pub trait InChart<R>: State {}
 

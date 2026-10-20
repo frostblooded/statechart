@@ -21,6 +21,62 @@ use std::fmt;
     label = "`{Self}` does not implement `Event`",
     note = "add `impl statechart::trigger::Event for {Self} {{ type Output = ...; }}`"
 )]
+///
+/// # Triggers cannot borrow
+///
+/// A trigger and its output are `'static`: they cannot hold references such as `&str` or
+/// `&mut World`, because the library passes them to the handlers type-erased (as `dyn Any`).
+/// `impl<'a> Event for Key<'a>` does not compile, and implementing it only for `Key<'static>`
+/// does not let a trigger carry a local borrow:
+///
+/// ```compile_fail,E0597
+/// # use statechart::prelude::*;
+/// # #[derive(Debug)] struct Editor;
+/// # impl State for Editor { type Parent = NoParent; }
+/// struct Typed<'a>(&'a str);
+/// impl Event for Typed<'static> {
+///     type Output = ();
+/// }
+///
+/// let mut chart = Statechart::new(Editor);
+/// let text = String::from("q");
+/// chart.trigger(Typed(&text)); // error: `text` does not live long enough
+/// ```
+///
+/// To pass data in, give the trigger owned fields (`struct Typed(String)`), or write it into the
+/// root before calling [`update`](crate::statechart::Statechart::update) and read it in the
+/// hooks through [`ctx.ancestor()`](crate::context::Context::ancestor):
+///
+/// ```
+/// # #![allow(non_camel_case_types)]
+/// # use statechart::prelude::*;
+/// #[derive(Debug)]
+/// struct Editor {
+///     input: String,
+/// }
+/// impl State for Editor {
+///     type Parent = NoParent;
+///     fn define(def: &mut Definition<Self>) {
+///         def.region::<Editor_Idle>();
+///     }
+/// }
+///
+/// #[derive(Debug, Default)]
+/// struct Editor_Idle {
+///     seen: String,
+/// }
+/// impl State for Editor_Idle {
+///     type Parent = Editor;
+///     fn update(&mut self, ctx: &mut Context<Self>) {
+///         self.seen.clone_from(&ctx.ancestor::<Editor>().unwrap().input);
+///     }
+/// }
+///
+/// let mut chart = Statechart::new(Editor { input: String::new() });
+/// chart.root_mut().input = String::from("q");
+/// chart.update();
+/// assert_eq!(chart.state::<Editor_Idle>().unwrap().seen, "q");
+/// ```
 pub trait Event: 'static {
     /// The value a handler returns. [`Statechart::trigger`](crate::statechart::Statechart::trigger)
     /// gives it back as `Ok(output)`. Use `()` for plain commands.

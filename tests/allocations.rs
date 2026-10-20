@@ -1,5 +1,7 @@
 //! The hot paths do not allocate: `update` without transitions, `trigger` (with a non-zero-sized
-//! output, with one region and with parallel regions), `is_active` and `state`.
+//! output, with one region and with parallel regions), `is_active` and `state`; and once warmed
+//! up, `update` and `trigger` that apply transitions between zero-sized leaves, including
+//! transitions requested by `on_enter`.
 //!
 //! A counting global allocator needs `unsafe`; it is confined to this test (the library itself
 //! forbids `unsafe`). The counter is per thread, so the test harness's own allocations on other
@@ -152,4 +154,75 @@ fn update_trigger_is_active_and_state_do_not_allocate() {
         }
     });
     assert_eq!(n, 0, "is_active / state");
+}
+
+/// Toggle -> Toggle_Ping (initial) | Toggle_Pong, both zero-sized leaves. Ping's `update` and
+/// its `Flip` handler request Pong; Pong's `on_enter` requests Ping back. So every update and
+/// every trigger applies two transitions, the second one requested by `on_enter`.
+mod toggle {
+    use super::*;
+
+    pub struct Flip;
+    impl Event for Flip {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Toggle;
+    impl State for Toggle {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Toggle_Ping>().child::<Toggle_Pong>();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Toggle_Ping;
+    impl State for Toggle_Ping {
+        type Parent = Toggle;
+        fn define(def: &mut Definition<Self>) {
+            def.trigger::<Flip>();
+        }
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Toggle_Pong);
+        }
+    }
+    impl Trigger<Flip> for Toggle_Ping {
+        fn handle(&mut self, _: &Flip, ctx: &mut Context<Self>) {
+            ctx.transition(Toggle_Pong);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Toggle_Pong;
+    impl State for Toggle_Pong {
+        type Parent = Toggle;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Toggle_Ping);
+        }
+    }
+}
+
+#[test]
+fn transitions_between_zero_sized_states_do_not_allocate_once_warmed_up() {
+    use toggle::*;
+    let mut chart = Statechart::new(Toggle);
+    // Warm up: the request buffers grow to their working size.
+    chart.update();
+    assert_eq!(chart.trigger(Flip), Ok(()));
+
+    let n = allocations_in(|| {
+        for _ in 0..100 {
+            chart.update();
+        }
+    });
+    assert_eq!(n, 0, "update with transitions");
+
+    let n = allocations_in(|| {
+        for _ in 0..100 {
+            assert_eq!(chart.trigger(Flip), Ok(()));
+        }
+    });
+    assert_eq!(n, 0, "trigger with transitions");
+    assert_eq!(chart.get_debug_name(), "Toggle -> Toggle_Ping");
 }

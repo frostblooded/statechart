@@ -713,3 +713,235 @@ fn an_unlisted_target_requested_in_on_enter_during_a_transition_leaves_the_chart
     assert!(!chart.is_active::<Root_A>());
     assert!(chart.is_active::<Root_B>());
 }
+
+/// A restart (a transition to the root type) whose old root's own `on_exit` panics. The new root
+/// has already taken the old one's place by then, but its `on_enter` has not run.
+mod interrupted_restart {
+    use super::*;
+
+    // Root { generation, mode } -> Root_A (initial) | Root_B
+    //
+    // Every hook logs itself ("enter Root 1", "exit Root_A"). `mode` makes the root's hooks
+    // misbehave: "panic in exit", "panic in enter", or "go to Root_B in enter" (its `on_enter`
+    // requests Root_B). The root handles `Restart`, which requests a new root with the next
+    // generation and no misbehaviour.
+
+    pub struct Restart;
+    impl Event for Restart {
+        type Output = ();
+    }
+
+    pub struct Root {
+        pub generation: u32,
+        pub mode: &'static str,
+    }
+    impl std::fmt::Debug for Root {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Root {}", self.generation)
+        }
+    }
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>().child::<Root_B>();
+            def.trigger::<Restart>();
+        }
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            common::log("enter", &format!("Root {}", self.generation));
+            match self.mode {
+                "panic in enter" => panic!("enter Root panicked"),
+                "go to Root_B in enter" => ctx.transition(Root_B),
+                _ => {}
+            }
+        }
+        fn on_exit(&mut self, _: &mut ExitContext<Self>) {
+            common::log("exit", &format!("Root {}", self.generation));
+            if self.mode == "panic in exit" {
+                panic!("exit Root panicked");
+            }
+        }
+        fn update(&mut self, _: &mut Context<Self>) {
+            common::log("update", &format!("Root {}", self.generation));
+        }
+    }
+    impl Trigger<Restart> for Root {
+        fn handle(&mut self, _: &Restart, ctx: &mut Context<Self>) {
+            ctx.transition(Root {
+                generation: self.generation + 1,
+                mode: "",
+            });
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_B;
+    impl State for Root_B {
+        type Parent = Root;
+        logging_hooks!();
+    }
+
+    /// A chart whose restart from generation 0 to 1 was interrupted by a panic in generation
+    /// 0's `on_exit`.
+    pub fn interrupted() -> Statechart<Root> {
+        let mut chart = Statechart::new(Root {
+            generation: 0,
+            mode: "panic in exit",
+        });
+        take_log();
+        let message = mid_transition::expect_panic(|| chart.trigger(Restart).unwrap());
+        assert_eq!(message, "exit Root panicked");
+        assert_eq!(take_log(), ["exit Root_A", "exit Root 0"]);
+        chart
+    }
+}
+
+#[test]
+fn a_panic_in_the_old_roots_on_exit_during_a_restart_still_leaves_a_root() {
+    use interrupted_restart::*;
+    let chart = interrupted();
+    // The new root has taken the old one's place but is not entered yet: no initial children.
+    assert_eq!(chart.root().generation, 1);
+    assert!(chart.is_active::<Root>());
+    assert!(!chart.is_active::<Root_A>());
+    assert_eq!(chart.get_debug_name(), "Root 1 -> (empty)");
+    assert!(chart.get_recursive_active_type_ids().is_empty());
+}
+
+#[test]
+fn the_next_operation_first_enters_a_root_left_unentered_by_an_interrupted_restart() {
+    use interrupted_restart::*;
+    let entered = ["enter Root 1", "enter Root_A"];
+
+    let mut chart = interrupted();
+    chart.update();
+    assert_eq!(
+        take_log(),
+        [&entered[..], &["update Root 1", "update Root_A"]].concat()
+    );
+    assert_eq!(chart.get_debug_name(), "Root 1 -> Root_A");
+
+    // Never exited without having been entered.
+    let restarted = ["exit Root_A", "exit Root 1", "enter Root 2", "enter Root_A"];
+    let mut chart = interrupted();
+    chart.trigger(Restart).unwrap();
+    assert_eq!(take_log(), [&entered[..], &restarted].concat());
+    assert_eq!(chart.get_debug_name(), "Root 2 -> Root_A");
+
+    let mut chart = interrupted();
+    assert_eq!(chart.trigger_all(Restart), Ok(vec![()]));
+    assert_eq!(take_log(), [&entered[..], &restarted].concat());
+    assert_eq!(chart.get_debug_name(), "Root 2 -> Root_A");
+}
+
+#[test]
+fn a_root_left_unentered_is_entered_once_and_its_on_enter_requests_apply_first() {
+    use interrupted_restart::*;
+    let mut chart = interrupted();
+    chart.root_mut().mode = "go to Root_B in enter";
+    chart.update();
+    assert_eq!(
+        take_log(),
+        [
+            "enter Root 1",
+            "enter Root_A",
+            "exit Root_A",
+            "enter Root_B",
+            "update Root 1",
+            "update Root_B"
+        ]
+    );
+    chart.update();
+    assert_eq!(take_log(), ["update Root 1", "update Root_B"]);
+    assert_eq!(chart.get_debug_name(), "Root 1 -> Root_B");
+}
+
+#[test]
+fn a_panic_while_entering_a_root_left_unentered_counts_as_entered() {
+    use interrupted_restart::*;
+    let mut chart = interrupted();
+    chart.root_mut().mode = "panic in enter";
+    let message = mid_transition::expect_panic(|| chart.update());
+    assert_eq!(message, "enter Root panicked");
+    assert_eq!(take_log(), ["enter Root 1"]);
+    assert_eq!(chart.get_debug_name(), "Root 1 -> (empty)");
+
+    // Not entered a second time; its empty region is filled by the next transition into it.
+    chart.root_mut().mode = "";
+    chart.update();
+    assert_eq!(take_log(), ["update Root 1"]);
+    chart.trigger(Restart).unwrap();
+    assert_eq!(take_log(), ["exit Root 1", "enter Root 2", "enter Root_A"]);
+}
+
+/// Loop { remaining } -> Loop_A (initial) <-> Loop_B: each one's `on_enter` requests the other
+/// while `remaining` is positive, counting it down. Building the chart with `remaining: n`
+/// applies exactly `n` transitions in one batch. `Loop::update` requests `Loop_A`.
+mod counted_loop {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Loop {
+        pub remaining: u32,
+    }
+    impl State for Loop {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Loop_A>().child::<Loop_B>();
+        }
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Loop_A);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Loop_A;
+    impl State for Loop_A {
+        type Parent = Loop;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            if ctx.parent().remaining > 0 {
+                ctx.parent_mut().remaining -= 1;
+                ctx.transition(Loop_B);
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Loop_B;
+    impl State for Loop_B {
+        type Parent = Loop;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            if ctx.parent().remaining > 0 {
+                ctx.parent_mut().remaining -= 1;
+                ctx.transition(Loop_A);
+            }
+        }
+    }
+}
+
+#[test]
+fn exactly_ten_thousand_transitions_in_one_batch_are_allowed() {
+    use counted_loop::*;
+    let chart = Statechart::new(Loop { remaining: 10_000 });
+    assert_eq!(chart.root().remaining, 0);
+    let panic = catch_unwind(|| Statechart::new(Loop { remaining: 10_001 })).unwrap_err();
+    assert!(panic_message(panic).starts_with("more than 10000 transitions in one batch"));
+}
+
+#[test]
+fn the_cycle_guard_counts_per_batch_not_per_chart() {
+    use counted_loop::*;
+    let mut chart = Statechart::new(Loop { remaining: 9_000 });
+    for _ in 0..3 {
+        // Loop_A again (a self-transition), then 9 000 more: 9 001 transitions per batch.
+        chart.root_mut().remaining = 9_000;
+        chart.update();
+        assert_eq!(chart.root().remaining, 0);
+    }
+}

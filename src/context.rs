@@ -2,7 +2,8 @@
 //! (except in `on_exit`) transitions.
 
 use crate::engine::{Ancestors, ErasedState, Registry, Request, Runtime};
-use crate::state::{InChart, ParentSlot, RootOf, State, sealed::ParentState};
+use crate::state::sealed::{ParentState, Registered, Sealed};
+use crate::state::{InChart, RootOf, State};
 use std::any::{TypeId, type_name};
 use std::marker::PhantomData;
 
@@ -61,6 +62,20 @@ use std::marker::PhantomData;
 ///     }
 /// }
 /// ```
+///
+/// Neither does `parent_mut()`:
+///
+/// ```compile_fail,E0277
+/// # use statechart::prelude::*;
+/// #[derive(Debug)]
+/// struct Timer;
+/// impl State for Timer {
+///     type Parent = NoParent;
+///     fn update(&mut self, ctx: &mut Context<Self>) {
+///         ctx.parent_mut(); // error: `NoParent` is not a statechart state
+///     }
+/// }
+/// ```
 pub struct Context<'a, S> {
     hook: Hook<'a>,
     _state: PhantomData<fn() -> S>,
@@ -78,6 +93,20 @@ pub struct Context<'a, S> {
 ///     type Parent = NoParent;
 ///     fn on_exit(&mut self, ctx: &mut ExitContext<Self>) {
 ///         ctx.transition(Timer); // error: no method named `transition`
+///     }
+/// }
+/// ```
+///
+/// Like [`Context`], it has no `parent()` / `parent_mut()` on the root:
+///
+/// ```compile_fail,E0277
+/// # use statechart::prelude::*;
+/// #[derive(Debug)]
+/// struct Timer;
+/// impl State for Timer {
+///     type Parent = NoParent;
+///     fn on_exit(&mut self, ctx: &mut ExitContext<Self>) {
+///         ctx.parent(); // error: `NoParent` is not a statechart state
 ///     }
 /// }
 /// ```
@@ -106,6 +135,27 @@ macro_rules! ancestor_access {
         }
 
         /// The direct parent's data. Statically typed; the root does not have this method.
+        ///
+        /// The bound `S::Parent: ParentState` means "the parent is a state", which is true for
+        /// every state except the root. `ParentState` is internal and cannot be named: generic
+        /// code over `S: State` writes the bound as `where S::Parent: State`, which implies it:
+        ///
+        /// ```
+        /// # #![allow(non_camel_case_types)]
+        /// # use statechart::prelude::*;
+        /// /// Works in the hooks of any state that has a parent.
+        /// fn parent_name<S: State>(ctx: &Context<S>) -> String
+        /// where
+        ///     S::Parent: State,
+        /// {
+        ///     format!("{:?}", ctx.parent())
+        /// }
+        /// # #[derive(Debug)] struct Timer;
+        /// # impl State for Timer { type Parent = NoParent; fn define(d: &mut Definition<Self>) { d.region::<Timer_Elapsed>(); } }
+        /// # #[derive(Debug, Default)] struct Timer_Elapsed;
+        /// # impl State for Timer_Elapsed { type Parent = Timer; fn update(&mut self, ctx: &mut Context<Self>) { assert_eq!(parent_name(ctx), "Timer"); } }
+        /// # Statechart::new(Timer).update();
+        /// ```
         pub fn parent(&self) -> &S::Parent
         where
             S::Parent: ParentState,
@@ -118,7 +168,8 @@ macro_rules! ancestor_access {
         }
 
         /// The direct parent's data, mutably. Statically typed; the root does not have this
-        /// method.
+        /// method. In generic code over `S: State`, call it under `where S::Parent: State` (see
+        /// [`parent`](Self::parent)).
         pub fn parent_mut(&mut self) -> &mut S::Parent
         where
             S::Parent: ParentState,
@@ -270,7 +321,7 @@ impl<'a, S: State> ExitContext<'a, S> {
 #[track_caller]
 fn unlisted_target<T: State>(reg: &Registry) -> ! {
     let is_registered = |ty: TypeId| reg.index_of(ty).is_some();
-    match <T::Parent as ParentSlot>::unlisted_link(&is_registered) {
+    match <T::Parent as Sealed>::unlisted_link(Registered(&is_registered)) {
         None => panic!(
             "Transition target `{}` is not part of this statechart: its parent `{}` does not list \
              it in `define`",
