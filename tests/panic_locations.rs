@@ -121,6 +121,41 @@ mod duplicate {
     }
 }
 
+/// `Via` lists `Via_A` again with `child`, `With` lists `With_A` again with `child_with`.
+mod duplicate_via_child {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Via;
+    impl State for Via {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Via_A>().child::<Via_A>();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Via_A;
+    impl State for Via_A {
+        type Parent = Via;
+    }
+
+    #[derive(Debug)]
+    pub struct With;
+    impl State for With {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<With_A>().child_with(|_: &With| With_A);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct With_A;
+    impl State for With_A {
+        type Parent = With;
+    }
+}
+
 /// `Root` registers the composite `Root_B` with `child_explicit`.
 mod explicit_composite {
     use super::*;
@@ -185,6 +220,16 @@ fn panics_about_mistakes_in_user_code_point_at_the_users_line() {
     });
     assert!(location.starts_with(here), "{location}: {message}");
     assert!(message.contains("`panic_locations::duplicate::Other` lists it twice"));
+
+    // The same with the duplicate listed by `child` and by `child_with`.
+    for f in [
+        (|| drop(Statechart::new(duplicate_via_child::Via))) as fn(),
+        || drop(Statechart::new(duplicate_via_child::With)),
+    ] {
+        let (location, message) = caught_panic(f);
+        assert!(location.starts_with(here), "{location}: {message}");
+        assert!(message.contains("appears more than once"), "{message}");
+    }
 
     // Whether a child is composite is only known once its own `define` has run, so this panic
     // comes from the library, and its message names the line that registered the child.

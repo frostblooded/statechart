@@ -1,7 +1,7 @@
 //! Batch semantics (spec item 10): transitions are applied after the traversal, in request
 //! order; a request made by a state that an earlier transition in the same batch exited is
 //! dropped (decided per instance, not per type); requests made in `on_enter` join the end of
-//! the batch.
+//! the batch, several of them in the order the hooks ran.
 #![allow(non_camel_case_types)]
 
 #[macro_use]
@@ -513,5 +513,114 @@ fn an_on_enter_request_waits_for_later_regions_during_a_transition() {
     assert_eq!(
         chart.get_debug_name(),
         "Root -> Root_A -> [Root_A_Y, Root_A_P]"
+    );
+}
+
+mod enter_order {
+    use super::*;
+
+    // Root
+    // ├── region 0: Root_A (initial)
+    // │   Root_A
+    // │   └── region: Root_A_X (initial)
+    // └── region 1: Root_P (initial), Root_Q, Root_S
+    //
+    // Root_A's on_enter requests Root_Q, then Root_A_X's on_enter requests Root_S. Root handles
+    // `Again` (-> Root_A, which enters Root_A and Root_A_X again).
+
+    pub struct Again;
+    impl Event for Again {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Root;
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>();
+            def.region::<Root_P>().child::<Root_Q>().child::<Root_S>();
+            def.trigger::<Again>();
+        }
+    }
+    impl Trigger<Again> for Root {
+        fn handle(&mut self, _: &Again, ctx: &mut Context<Self>) {
+            ctx.transition(Root_A);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A_X>();
+        }
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Root_Q);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A_X;
+    impl State for Root_A_X {
+        type Parent = Root_A;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Root_S);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_P;
+    impl State for Root_P {
+        type Parent = Root;
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_Q;
+    impl State for Root_Q {
+        type Parent = Root;
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_S;
+    impl State for Root_S {
+        type Parent = Root;
+        logging_hooks!();
+    }
+}
+
+/// Several `on_enter` requests of one batch apply in the order the hooks ran (parent before
+/// child), both while `new` enters the chart and while a transition is applied. The last one
+/// wins: the chart ends in Root_S, not Root_Q.
+#[test]
+fn on_enter_requests_apply_in_the_order_the_hooks_ran() {
+    use enter_order::*;
+    let mut chart = Statechart::new(Root);
+    assert_eq!(
+        take_log_without_updates(),
+        [
+            "enter Root_P",
+            "exit Root_P",
+            "enter Root_Q",
+            "exit Root_Q",
+            "enter Root_S"
+        ]
+    );
+    assert_eq!(
+        chart.get_debug_name(),
+        "Root -> [Root_A -> Root_A_X, Root_S]"
+    );
+
+    chart.trigger(Again).unwrap();
+    assert_eq!(
+        take_log_without_updates(),
+        ["exit Root_S", "enter Root_Q", "exit Root_Q", "enter Root_S"]
+    );
+    assert_eq!(
+        chart.get_debug_name(),
+        "Root -> [Root_A -> Root_A_X, Root_S]"
     );
 }

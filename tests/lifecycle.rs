@@ -1,7 +1,9 @@
 //! Lifecycle order (spec items 7 and 14): `on_enter` parent before child (initial children
 //! included), `on_exit` deepest first, `update` parent before children, regions in
 //! declaration order; constructors run when their region is entered (after the parent's
-//! `on_enter` and its earlier regions); exited states are dropped right after their `on_exit`.
+//! `on_enter` and its earlier regions, and during a transition after the old subtree is exited
+//! and dropped); exited states are dropped right after their `on_exit`; the target of a dropped
+//! request is dropped as soon as the request is.
 #![allow(non_camel_case_types)]
 
 #[macro_use]
@@ -291,6 +293,105 @@ fn a_constructor_run_by_a_transition_sees_the_parents_current_data() {
     assert_eq!(chart.state::<hub::Hub_Deep>().unwrap().seen, 42);
 }
 
+mod save_on_exit {
+    use super::*;
+
+    // Game { saved }
+    // └── region: Game_Play { points } (initial), Game_Over { score } (built from Game)
+    //     Game_Over
+    //     └── region: Game_Over_Menu (initial), Game_Over_Credits
+    //
+    // Game_Play's update requests Game_Over_Credits, so the transition builds the inactive
+    // Game_Over with its constructor. Game_Play's on_exit saves its points into the parent.
+
+    #[derive(Debug, Default)]
+    pub struct Game {
+        pub saved: u32,
+    }
+    impl State for Game {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Game_Play>().child_with(|game: &Game| {
+                log("build", "Game_Over");
+                Game_Over { score: game.saved }
+            });
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Game_Play {
+        pub points: u32,
+    }
+    impl State for Game_Play {
+        type Parent = Game;
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            self.points = 7;
+            ctx.transition(Game_Over_Credits);
+        }
+        fn on_exit(&mut self, ctx: &mut ExitContext<Self>) {
+            log("exit", "Game_Play");
+            ctx.parent_mut().saved = self.points;
+        }
+    }
+    impl Drop for Game_Play {
+        fn drop(&mut self) {
+            log("drop", "Game_Play");
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Game_Over {
+        pub score: u32,
+    }
+    impl State for Game_Over {
+        type Parent = Game;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Game_Over_Menu>().child::<Game_Over_Credits>();
+        }
+        fn on_enter(&mut self, _: &mut Context<Self>) {
+            log("enter", "Game_Over");
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Game_Over_Menu;
+    impl State for Game_Over_Menu {
+        type Parent = Game_Over;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Game_Over_Credits;
+    impl State for Game_Over_Credits {
+        type Parent = Game_Over;
+        fn on_enter(&mut self, _: &mut Context<Self>) {
+            log("enter", "Game_Over_Credits");
+        }
+    }
+}
+
+/// A transition exits (and drops) the old subtree before it builds the target's inactive
+/// ancestors, so their constructors see what the exited states' `on_exit` wrote into the
+/// parent through `parent_mut`.
+#[test]
+fn a_transitions_constructor_runs_after_the_old_subtree_is_exited_and_dropped() {
+    use save_on_exit::*;
+    let mut chart = Statechart::new(Game::default());
+    take_log();
+    chart.update();
+    assert_eq!(
+        take_log(),
+        [
+            "exit Game_Play",
+            "drop Game_Play",
+            "build Game_Over",
+            "enter Game_Over",
+            "enter Game_Over_Credits"
+        ]
+    );
+    assert_eq!(chart.root().saved, 7);
+    assert_eq!(chart.state::<Game_Over>().unwrap().score, 7);
+}
+
 mod dropping {
     use super::*;
 
@@ -442,4 +543,90 @@ fn dropping_the_chart_drops_the_states_in_post_order() {
     // Children before their parent, regions in declaration order: R_A (depth 1) is dropped
     // before R_B_1 (depth 2).
     assert_eq!(take_log(), ["drop R_A", "drop R_B_1", "drop R_B", "drop R"]);
+}
+
+mod dropped_target {
+    use super::*;
+
+    // Root
+    // ├── region 0: Root_A (initial), Root_B { lock } (explicit only), Root_C
+    // └── region 1: Root_P (initial), Root_Q
+    //
+    // Update order: Root (-> Root_C, which exits Root_A), Root_A (-> Root_B { lock }: dropped,
+    // because Root_A is exited first), Root_P (-> Root_Q).
+
+    /// Logs when it is released.
+    #[derive(Debug)]
+    pub struct Lock;
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            log("release", "lock");
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Root;
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>()
+                .child_explicit::<Root_B>()
+                .child::<Root_C>();
+            def.region::<Root_P>().child::<Root_Q>();
+        }
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Root_C);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Root_B { _lock: Lock });
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Root_B {
+        pub _lock: Lock,
+    }
+    impl State for Root_B {
+        type Parent = Root;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_C;
+    impl State for Root_C {
+        type Parent = Root;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_P;
+    impl State for Root_P {
+        type Parent = Root;
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Root_Q);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_Q;
+    impl State for Root_Q {
+        type Parent = Root;
+        logging_hooks!();
+    }
+}
+
+/// The target of a request dropped by the drop rule (its requester was exited earlier in the
+/// batch) is released right then, before the rest of the batch is applied.
+#[test]
+fn the_target_of_a_dropped_request_is_released_when_the_request_is_dropped() {
+    use dropped_target::*;
+    let mut chart = Statechart::new(Root);
+    take_log();
+    chart.update();
+    assert_eq!(take_log_without_updates(), ["release lock", "enter Root_Q"]);
+    assert_eq!(chart.get_debug_name(), "Root -> [Root_C, Root_Q]");
 }

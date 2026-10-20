@@ -1,5 +1,6 @@
-//! Transition shapes: sibling, into inactive ancestors (built from parent data), deep to
-//! shallow with a payload, self-transition, to an active ancestor, and to the root.
+//! Transition shapes: sibling, into inactive ancestors (built from parent data), two levels
+//! below an active non-root LCA, deep to shallow with a payload, self-transition, to an active
+//! ancestor, and to the root (including the requests of the new root's `on_enter`).
 #![allow(non_camel_case_types)]
 
 #[macro_use]
@@ -264,6 +265,98 @@ fn a_transition_to_an_active_ancestor_re_enters_that_ancestor() {
     );
 }
 
+mod below_the_lca {
+    use super::*;
+
+    // R
+    // └── region: R_Z (initial)
+    //     R_Z
+    //     └── region: R_Z_1 (initial), R_Z_2
+    //         R_Z_2
+    //         └── region: R_Z_2_A (initial), R_Z_2_B
+    //
+    // R_Z_1 handles `Deep` (-> R_Z_2_B, a grandchild of its active parent R_Z).
+
+    pub struct Deep;
+    impl Event for Deep {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct R;
+    impl State for R {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<R_Z>();
+        }
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_Z;
+    impl State for R_Z {
+        type Parent = R;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<R_Z_1>().child::<R_Z_2>();
+        }
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_Z_1;
+    impl State for R_Z_1 {
+        type Parent = R_Z;
+        fn define(def: &mut Definition<Self>) {
+            def.trigger::<Deep>();
+        }
+        logging_hooks!();
+    }
+    impl Trigger<Deep> for R_Z_1 {
+        fn handle(&mut self, _: &Deep, ctx: &mut Context<Self>) {
+            ctx.transition(R_Z_2_B);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_Z_2;
+    impl State for R_Z_2 {
+        type Parent = R_Z;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<R_Z_2_A>().child::<R_Z_2_B>();
+        }
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_Z_2_A;
+    impl State for R_Z_2_A {
+        type Parent = R_Z_2;
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_Z_2_B;
+    impl State for R_Z_2_B {
+        type Parent = R_Z_2;
+        logging_hooks!();
+    }
+}
+
+/// The LCA is the deepest active state on the target's path, also when the target is two
+/// levels below it: `R_Z` stays, only its region is exited and entered.
+#[test]
+fn a_transition_two_levels_below_an_active_non_root_state_does_not_re_enter_it() {
+    use below_the_lca::*;
+    let mut chart = Statechart::new(R);
+    common::take_log();
+    chart.trigger(Deep).unwrap();
+    assert_eq!(
+        take_log_without_updates(),
+        ["exit R_Z_1", "enter R_Z_2", "enter R_Z_2_B"]
+    );
+    assert_eq!(chart.get_debug_name(), "R -> R_Z -> R_Z_2 -> R_Z_2_B");
+}
+
 #[test]
 fn a_transition_to_the_root_type_restarts_the_whole_chart() {
     let mut chart = new_chart();
@@ -487,4 +580,88 @@ fn after_a_restart_the_new_root_is_active_and_its_requests_apply() {
     assert!(chart.is_active::<Root>());
     chart.trigger(GoB).unwrap();
     assert_eq!(chart.get_debug_name(), "Root { generation: 1 } -> Root_B");
+}
+
+mod restart_requests {
+    use super::*;
+
+    // Root { generation } -> Root_A (initial) | Root_B
+    //
+    // Root handles `Restart` (-> a new root with the next generation). The new root's `on_enter`
+    // (generation 1) and Root_A's `on_enter` (generation 2) request transitions while the
+    // restart enters them.
+
+    pub struct Restart;
+    impl Event for Restart {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Root {
+        pub generation: u32,
+    }
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>().child::<Root_B>();
+            def.trigger::<Restart>();
+        }
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            if self.generation == 1 {
+                ctx.transition(Root_B);
+            }
+        }
+    }
+    impl Trigger<Restart> for Root {
+        fn handle(&mut self, _: &Restart, ctx: &mut Context<Self>) {
+            ctx.transition(Root {
+                generation: self.generation + 1,
+            });
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            common::log("enter", "Root_A");
+            if ctx.parent().generation == 2 {
+                ctx.transition(Root_B);
+            }
+        }
+        fn on_exit(&mut self, _: &mut ExitContext<Self>) {
+            common::log("exit", "Root_A");
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_B;
+    impl State for Root_B {
+        type Parent = Root;
+        logging_hooks!();
+    }
+}
+
+/// The requests that `on_enter` hooks make while a restart enters the new root and its
+/// initial descendants are applied, like those of any other transition.
+#[test]
+fn on_enter_requests_made_while_a_restart_enters_the_new_root_are_applied() {
+    use restart_requests::*;
+    let mut chart = Statechart::new(Root { generation: 0 });
+    common::take_log();
+    chart.trigger(Restart).unwrap();
+    assert_eq!(
+        take_log_without_updates(),
+        ["exit Root_A", "enter Root_A", "exit Root_A", "enter Root_B"]
+    );
+    assert_eq!(chart.get_debug_name(), "Root { generation: 1 } -> Root_B");
+
+    // Generation 2: this time the new root's initial child makes the request.
+    chart.trigger(Restart).unwrap();
+    assert_eq!(
+        take_log_without_updates(),
+        ["exit Root_B", "enter Root_A", "exit Root_A", "enter Root_B"]
+    );
+    assert_eq!(chart.get_debug_name(), "Root { generation: 2 } -> Root_B");
 }

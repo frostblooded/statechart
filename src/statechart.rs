@@ -98,7 +98,9 @@ use std::marker::PhantomData;
 ///   bubbles from it straight to its parent, and the next transition to one of its states (or
 ///   to an ancestor) enters it again. A restart (a transition to the root type) never leaves
 ///   the chart without a root: the old root stays until its descendants are exited, then the
-///   new root takes its place.
+///   new root takes its place. The subtree a restart exits is every region of the old root, so
+///   a panic while one region is exited drops the later regions too (without `on_exit`) and
+///   leaves the old root in place with every region empty.
 /// * If that old root's own `on_exit` panics, the new root is already in place but **not
 ///   entered yet**: it is the active root ([`root`](Self::root) returns it,
 ///   [`is_active`](Self::is_active) is `true`), its regions are empty, and its `on_enter` has

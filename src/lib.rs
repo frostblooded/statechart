@@ -100,7 +100,10 @@
 //!
 //! let mut chart = Statechart::new(A);
 //! assert_eq!(chart.get_debug_name(), "A -> A_B1");
-//! assert_eq!(chart.trigger(Foo), Ok("A_B1")); // only the deepest handler runs
+//! assert_eq!(chart.trigger(Foo), Ok("A_B1"));
+//! // Only the deepest handler runs: `trigger_all` returns every handler's output, and A's
+//! // handler did not run.
+//! assert_eq!(chart.trigger_all(Foo), Ok(vec!["A_B1"]));
 //! assert_eq!(chart.trigger(Bar), Ok("A_B1"));
 //!
 //! chart.trigger(Switch).unwrap();
@@ -112,8 +115,9 @@
 //! # Example: parallel regions and parent data
 //!
 //! `Robot` has two regions that are active at the same time. Each branch bubbles a trigger on
-//! its own, and a shared ancestor runs at most once. A child reads and changes its parent's
-//! data with [`ctx.parent_mut()`](context::Context::parent_mut), which is statically typed.
+//! its own, and a shared ancestor runs at most once. A transition into one region leaves the
+//! other region as it is. A child reads and changes its parent's data with
+//! [`ctx.parent_mut()`](context::Context::parent_mut), which is statically typed.
 //!
 //! ```
 //! #![allow(non_camel_case_types)]
@@ -178,19 +182,32 @@
 //! }
 //!
 //! #[derive(Debug, Default)]
-//! struct Robot_Silent;
+//! struct Robot_Silent {
+//!     updates: u32,
+//! }
 //! impl State for Robot_Silent {
 //!     type Parent = Robot;
+//!     fn update(&mut self, _: &mut Context<Self>) {
+//!         self.updates += 1;
+//!     }
 //! }
 //!
 //! let mut chart = Statechart::new(Robot::default());
-//! assert_eq!(chart.get_debug_name(), "Robot { steps: 0 } -> [Robot_Still, Robot_Silent]");
+//! chart.update();
+//! assert_eq!(
+//!     chart.get_debug_name(),
+//!     "Robot { steps: 0 } -> [Robot_Still, Robot_Silent { updates: 1 }]"
+//! );
 //! // Neither leaf handles Status, so both branches bubble up to Robot, which runs once.
 //! assert_eq!(chart.trigger_all(Status), Ok(vec!["idle"]));
 //!
 //! chart.trigger(Walk).unwrap();
 //! chart.update();
-//! assert_eq!(chart.get_debug_name(), "Robot { steps: 1 } -> [Robot_Walking, Robot_Silent]");
+//! // Walk changed region 0 only: region 1 kept its Robot_Silent, which has now seen 2 updates.
+//! assert_eq!(
+//!     chart.get_debug_name(),
+//!     "Robot { steps: 1 } -> [Robot_Walking, Robot_Silent { updates: 2 }]"
+//! );
 //! // Region 0 is handled by Robot_Walking; region 1 still bubbles up to Robot.
 //! assert_eq!(chart.trigger_all(Status), Ok(vec!["walking", "idle"]));
 //! assert_eq!(chart.trigger(Status), Ok("walking")); // the first output in execution order
@@ -279,8 +296,9 @@
 //! in a hook.
 //!
 //! One mistake cannot be detected: implementing `Trigger<E>` but forgetting
-//! `def.trigger::<E>()`. That handler never runs, and the trigger is `Err(NotHandled)` unless
-//! another active state handles it.
+//! `def.trigger::<E>()`. That handler never runs (on its branch the trigger bubbles on to the
+//! state's ancestors), and the trigger is `Err(NotHandled)` unless another active state handles
+//! it, in any region.
 //!
 //! # Limitations
 //!
@@ -297,7 +315,7 @@
 //! and [`statechart`], and can always be named through those paths. The crate root re-exports
 //! nothing else.
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![warn(missing_docs, missing_debug_implementations)]
 #![allow(non_camel_case_types)]
 
 pub mod context;

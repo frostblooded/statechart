@@ -53,8 +53,15 @@ use std::fmt;
 /// assert_eq!(chart.trigger(Say("hello")), Ok("hello"));
 /// ```
 ///
-/// `impl<'a> Event for Key<'a>` does not compile, and implementing it only for `Key<'static>`
-/// does not let a trigger carry a local borrow:
+/// A trigger type with a lifetime parameter cannot implement `Event` for every lifetime:
+///
+/// ```compile_fail,E0478
+/// # use statechart::prelude::*;
+/// struct Typed<'a>(&'a str);
+/// impl<'a> Event for Typed<'a> { type Output = (); } // error: `'a` must outlive `'static` (rustc also reports E0803)
+/// ```
+///
+/// And implementing it only for `Typed<'static>` does not let a trigger carry a local borrow:
 ///
 /// ```compile_fail,E0597
 /// # use statechart::prelude::*;
@@ -151,10 +158,11 @@ pub trait Event: 'static {
 ///
 /// The registration is what the library dispatches on; the trait impl alone is invisible to it.
 /// **A forgotten `def.trigger::<E>()` is not detected**, neither at compile time nor at run
-/// time: the handler silently never runs, the trigger bubbles on to the state's ancestors, and
-/// if none of them handles it [`Statechart::trigger`](crate::statechart::Statechart::trigger)
-/// returns `Err(NotHandled)`. (The reverse, registering a trigger without implementing this
-/// trait, does not compile.)
+/// time: the handler silently never runs, and on that state's branch the trigger bubbles on to
+/// the state's ancestors. If no active state handles it (in any region),
+/// [`Statechart::trigger`](crate::statechart::Statechart::trigger) returns `Err(NotHandled)`;
+/// with parallel regions, another region may still handle it. (The reverse, registering a
+/// trigger without implementing this trait, does not compile.)
 ///
 /// # Dispatch
 ///

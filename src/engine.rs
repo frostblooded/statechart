@@ -548,12 +548,30 @@ impl Registry {
     /// A new node for `state` (of registry index `idx`), live from now on, with every region
     /// vacant.
     fn place(&self, rt: &mut Runtime, idx: usize, state: Box<dyn ErasedState>) -> Node {
-        let info = &self.states[idx];
+        let regions = self.states[idx]
+            .regions
+            .iter()
+            .map(|_| Node::vacant())
+            .collect();
+        self.place_with(rt, idx, state, regions)
+    }
+
+    /// [`place`](Self::place) with the given vacant regions (one per region of `idx`).
+    fn place_with(
+        &self,
+        rt: &mut Runtime,
+        idx: usize,
+        state: Box<dyn ErasedState>,
+        regions: Vec<Node>,
+    ) -> Node {
+        debug_assert!(
+            regions.len() == self.states[idx].regions.len() && regions.iter().all(Node::is_vacant)
+        );
         Node {
             state,
             idx,
-            id: rt.activate(info.ty),
-            regions: info.regions.iter().map(|_| Node::vacant()).collect(),
+            id: rt.activate(self.states[idx].ty),
+            regions,
         }
     }
 
@@ -735,22 +753,29 @@ impl Registry {
 
     /// Exits the whole chart and enters `new_root` with its initial descendants.
     ///
+    /// Like every exited subtree, the old root's regions are all detached (the root keeps
+    /// vacant ones) before any of them is exited, so a panic while one is exited drops the
+    /// later ones without `on_exit` instead of leaving them active under the old root.
+    ///
     /// The root slot is never vacant: the new root takes the old one's place once the old
     /// root's descendants are exited, just before the old root's own `on_exit`. Until its own
     /// `on_enter` starts it is marked as not entered yet ([`Runtime::root_pending_enter`]), so
     /// if the old root's `on_exit` panics, the next operation enters it first.
     fn restart(&self, rt: &mut Runtime, root: &mut Node, new_root: Box<dyn ErasedState>) {
+        let vacant = root.regions.iter().map(|_| Node::vacant()).collect();
+        let detached = std::mem::replace(&mut root.regions, vacant);
         {
-            let Node { state, regions, .. } = &mut *root;
             let mut frame = Frame {
-                head: &mut **state,
+                head: &mut *root.state,
                 tail: &mut Nil,
             };
-            for slot in regions.iter_mut() {
-                self.exit_slot(rt, slot, &mut frame);
+            for node in detached {
+                self.exit_detached(rt, node, &mut frame);
             }
         }
-        let old = std::mem::replace(root, self.place(rt, 0, new_root));
+        // The new root has the same regions, so it takes over the vacant ones.
+        let regions = std::mem::take(&mut root.regions);
+        let old = std::mem::replace(root, self.place_with(rt, 0, new_root, regions));
         rt.root_pending_enter = true;
         self.exit_detached(rt, old, &mut Nil);
         self.enter_placed_root(rt, root);

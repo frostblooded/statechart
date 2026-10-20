@@ -5,6 +5,7 @@ use crate::engine::{Ancestors, ErasedState, Registry, Request, Runtime};
 use crate::state::sealed::{ParentState, Registered, Sealed};
 use crate::state::{InChart, RootOf, State};
 use std::any::{TypeId, type_name};
+use std::fmt;
 use std::marker::PhantomData;
 
 /// What `update`, `on_enter` and trigger handlers of state `S` can see and do.
@@ -187,6 +188,21 @@ pub struct ExitContext<'a, S> {
     _state: PhantomData<fn() -> S>,
 }
 
+/// Prints the state's type and its parent's data (`None` for the root), e.g.
+/// `Context { state: "my_crate::Timer_Active", parent: Some(Timer { .. }), .. }`.
+impl<S> fmt::Debug for Context<'_, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.hook.debug::<S>(f, "Context")
+    }
+}
+
+/// Prints the state's type and its parent's data, like [`Context`]'s `Debug`.
+impl<S> fmt::Debug for ExitContext<'_, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.hook.debug::<S>(f, "ExitContext")
+    }
+}
+
 /// The untyped part of both contexts: the ancestor frames, the registry and the runtime.
 pub(crate) struct Hook<'a> {
     pub(crate) anc: &'a mut dyn Ancestors,
@@ -196,9 +212,20 @@ pub(crate) struct Hook<'a> {
     pub(crate) id: u64,
 }
 
-/// Methods shared by [`Context`] and [`ExitContext`].
+impl Hook<'_> {
+    /// The `Debug` of both contexts, for the state `S` whose hook runs.
+    fn debug<S>(&self, f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
+        f.debug_struct(name)
+            .field("state", &type_name::<S>())
+            .field("parent", &self.anc.parent())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Methods shared by [`Context`] and [`ExitContext`]. `$ctx` is the context type and `$hook`
+/// a hook that gets it, so that each type's docs show helpers written for that type.
 macro_rules! ancestor_access {
-    () => {
+    ($ctx:ident, $hook:literal, $works_in:literal) => {
         pub(crate) fn new(hook: Hook<'a>) -> Self {
             Self {
                 hook,
@@ -210,23 +237,31 @@ macro_rules! ancestor_access {
         ///
         /// The bound `S::Parent: ParentState` means "the parent is a state", which is true for
         /// every state except the root. `ParentState` is internal and cannot be named: generic
-        /// code over `S: State` writes the bound as `where S::Parent: State`, which implies it:
+        /// code over `S: State` writes the bound as `where S::Parent: State`, which implies it.
+        ///
+        /// [`Context`] (for `update`, `on_enter` and trigger handlers) and [`ExitContext`] (for
+        /// `on_exit`) are different types, and no trait covers both: a generic helper takes the
+        /// context of the hooks it is called from, and a helper needed in every hook is written
+        /// once for each type.
         ///
         /// ```
         /// # #![allow(non_camel_case_types)]
         /// # use statechart::prelude::*;
-        /// /// Works in the hooks of any state that has a parent.
-        /// fn parent_name<S: State>(ctx: &Context<S>) -> String
+        /// # use std::sync::atomic::{AtomicBool, Ordering};
+        #[doc = concat!("/// ", $works_in)]
+        #[doc = concat!("fn parent_name<S: State>(ctx: &", stringify!($ctx), "<S>) -> String")]
         /// where
         ///     S::Parent: State,
         /// {
         ///     format!("{:?}", ctx.parent())
         /// }
+        /// # static CALLED: AtomicBool = AtomicBool::new(false);
         /// # #[derive(Debug)] struct Timer;
-        /// # impl State for Timer { type Parent = NoParent; fn define(d: &mut Definition<Self>) { d.region::<Timer_Elapsed>(); } }
+        /// # impl State for Timer { type Parent = NoParent; fn define(d: &mut Definition<Self>) { d.region::<Timer_Elapsed>(); } fn update(&mut self, ctx: &mut Context<Self>) { ctx.transition(Timer); } }
         /// # #[derive(Debug, Default)] struct Timer_Elapsed;
-        /// # impl State for Timer_Elapsed { type Parent = Timer; fn update(&mut self, ctx: &mut Context<Self>) { assert_eq!(parent_name(ctx), "Timer"); } }
+        #[doc = concat!("# impl State for Timer_Elapsed { type Parent = Timer; fn ", $hook, "(&mut self, ctx: &mut ", stringify!($ctx), "<Self>) { assert_eq!(parent_name(ctx), \"Timer\"); CALLED.store(true, Ordering::Relaxed); } }")]
         /// # Statechart::new(Timer).update();
+        /// # assert!(CALLED.load(Ordering::Relaxed));
         /// ```
         #[must_use]
         pub fn parent(&self) -> &S::Parent
@@ -325,7 +360,11 @@ macro_rules! ancestor_access {
 }
 
 impl<'a, S: State> Context<'a, S> {
-    ancestor_access!();
+    ancestor_access!(
+        Context,
+        "update",
+        "Works in `update`, `on_enter` and the trigger handlers of any state that has a parent."
+    );
 
     /// Requests a transition to `target`, which becomes the active state of its region. Its
     /// inactive ancestors are built and entered first (each with the constructor its parent
@@ -344,6 +383,70 @@ impl<'a, S: State> Context<'a, S> {
     /// leaves the sibling regions as they are. To reset every region, target the parallel
     /// state itself: its parent is then the LCA, and the parallel state is exited and entered
     /// again with all of its regions.
+    ///
+    /// ```
+    /// # #![allow(non_camel_case_types)]
+    /// # use statechart::prelude::*;
+    /// # struct Walk; impl Event for Walk { type Output = (); }
+    /// # struct Talk; impl Event for Talk { type Output = (); }
+    /// # struct Reboot; impl Event for Reboot { type Output = (); }
+    /// # #[derive(Debug, Default)] struct Robot_On_Still;
+    /// # impl State for Robot_On_Still { type Parent = Robot_On; }
+    /// # #[derive(Debug, Default)] struct Robot_On_Walking;
+    /// # impl State for Robot_On_Walking { type Parent = Robot_On; }
+    /// # #[derive(Debug, Default)] struct Robot_On_Quiet;
+    /// # impl State for Robot_On_Quiet { type Parent = Robot_On; }
+    /// # #[derive(Debug, Default)] struct Robot_On_Talking;
+    /// # impl State for Robot_On_Talking { type Parent = Robot_On; }
+    /// #[derive(Debug)]
+    /// struct Robot;
+    /// impl State for Robot {
+    ///     type Parent = NoParent;
+    ///     fn define(def: &mut Definition<Self>) {
+    ///         def.region::<Robot_On>();
+    ///         def.trigger::<Reboot>();
+    ///     }
+    /// }
+    /// impl Trigger<Reboot> for Robot {
+    ///     fn handle(&mut self, _: &Reboot, ctx: &mut Context<Self>) {
+    ///         ctx.transition(Robot_On); // the parallel state itself: resets both regions
+    ///     }
+    /// }
+    ///
+    /// #[derive(Debug, Default)]
+    /// struct Robot_On;
+    /// impl State for Robot_On {
+    ///     type Parent = Robot;
+    ///     fn define(def: &mut Definition<Self>) {
+    ///         def.region::<Robot_On_Still>().child::<Robot_On_Walking>(); // the legs
+    ///         def.region::<Robot_On_Quiet>().child::<Robot_On_Talking>(); // the voice
+    ///         def.trigger::<Walk>().trigger::<Talk>();
+    ///     }
+    /// }
+    /// impl Trigger<Walk> for Robot_On {
+    ///     fn handle(&mut self, _: &Walk, ctx: &mut Context<Self>) {
+    ///         ctx.transition(Robot_On_Walking); // the legs' region only
+    ///     }
+    /// }
+    /// impl Trigger<Talk> for Robot_On {
+    ///     fn handle(&mut self, _: &Talk, ctx: &mut Context<Self>) {
+    ///         ctx.transition(Robot_On_Talking); // the voice's region only
+    ///     }
+    /// }
+    ///
+    /// let mut chart = Statechart::new(Robot);
+    /// chart.trigger(Talk).unwrap();
+    /// chart.trigger(Walk).unwrap(); // the voice keeps talking
+    /// assert_eq!(
+    ///     chart.get_debug_name(),
+    ///     "Robot -> Robot_On -> [Robot_On_Walking, Robot_On_Talking]"
+    /// );
+    /// chart.trigger(Reboot).unwrap(); // both regions start over
+    /// assert_eq!(
+    ///     chart.get_debug_name(),
+    ///     "Robot -> Robot_On -> [Robot_On_Still, Robot_On_Quiet]"
+    /// );
+    /// ```
     ///
     /// Only states of the same chart are accepted (in generic code over `S: State`, write the
     /// bound as `T: InChart<RootOf<S>>`; see
@@ -410,7 +513,11 @@ impl<'a, S: State> Context<'a, S> {
 }
 
 impl<'a, S: State> ExitContext<'a, S> {
-    ancestor_access!();
+    ancestor_access!(
+        ExitContext,
+        "on_exit",
+        "Works in `on_exit` of any state that has a parent."
+    );
 }
 
 /// Panics for a transition target that the registry does not know, naming the missing link.

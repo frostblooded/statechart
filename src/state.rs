@@ -60,8 +60,9 @@ pub trait State: Any + Debug + Sized {
     ///
     /// **Every handled trigger must be registered here** with
     /// [`def.trigger::<E>()`](Definition::trigger). An `impl Trigger<E>` that is not registered
-    /// is never called, and nothing warns about it: the trigger then falls back to an ancestor,
-    /// or is `Err(NotHandled)`.
+    /// is never called, and nothing warns about it: on this state's branch the trigger bubbles
+    /// on to its ancestors, and if no active state handles it (in any region) the result is
+    /// `Err(NotHandled)`.
     fn define(def: &mut Definition<Self>) {
         let _ = def;
     }
@@ -132,6 +133,12 @@ pub(crate) mod sealed {
     /// it cannot run [`Sealed::unlisted_link`].
     #[derive(Clone, Copy)]
     pub struct Registered<'a>(pub(crate) &'a dyn Fn(TypeId) -> bool);
+
+    impl std::fmt::Debug for Registered<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Registered(..)")
+        }
+    }
 
     /// The supertrait of [`ParentSlot`](super::ParentSlot), implemented for `NoParent` and
     /// every state.

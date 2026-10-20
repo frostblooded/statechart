@@ -1,5 +1,5 @@
 //! Spec item 13: the Debug format of the active configuration, `get_recursive_active_type_ids`,
-//! `is_active` and `state`.
+//! `is_active`, `state` and `state_mut`; and `Debug` for the contexts and the definition.
 #![allow(non_camel_case_types)]
 
 use statechart::prelude::*;
@@ -26,7 +26,13 @@ fn a_lone_root_prints_as_itself_and_has_no_active_descendants() {
 mod chain {
     use super::*;
 
-    // A -> A_B { n } -> A_B_C, with A_X as an inactive sibling of A_B.
+    // A -> A_B { n } -> A_B_C, with the leaf A_X as an inactive sibling of A_B. A handles `GoX`
+    // (-> A_X).
+
+    pub struct GoX;
+    impl Event for GoX {
+        type Output = ();
+    }
 
     #[derive(Debug)]
     pub struct A;
@@ -34,6 +40,12 @@ mod chain {
         type Parent = NoParent;
         fn define(def: &mut Definition<Self>) {
             def.region::<A_B>().child::<A_X>();
+            def.trigger::<GoX>();
+        }
+    }
+    impl Trigger<GoX> for A {
+        fn handle(&mut self, _: &GoX, ctx: &mut Context<Self>) {
+            ctx.transition(A_X);
         }
     }
 
@@ -88,6 +100,20 @@ fn is_active_and_state_follow_the_active_configuration() {
     assert_eq!(chart.state::<A_B>().unwrap().n, 0);
     assert!(chart.state::<A_X>().is_none());
     assert!(chart.state::<A>().is_some());
+}
+
+/// `state` / `state_mut` follow the static path of `T` through the active tree. When an
+/// ancestor of `T` was replaced by a leaf, the walk stops there: `None`, not a panic.
+#[test]
+fn state_of_a_deep_state_whose_ancestor_was_replaced_by_a_leaf_is_none() {
+    use chain::*;
+    let mut chart = Statechart::new(A);
+    assert!(chart.state::<A_B_C>().is_some());
+    chart.trigger(GoX).unwrap();
+    assert_eq!(chart.get_debug_name(), "A -> A_X");
+    assert!(chart.state::<A_B_C>().is_none());
+    assert!(chart.state_mut::<A_B_C>().is_none());
+    assert!(!chart.is_active::<A_B_C>());
 }
 
 mod robot {
@@ -236,4 +262,99 @@ fn active_type_ids_are_post_order_not_sorted_by_depth() {
             TypeId::of::<R_B>()
         ]
     );
+}
+
+/// `Context`, `ExitContext`, `Definition` and `Region` implement `Debug` (Rust API guideline
+/// C-DEBUG), so a hook or `define` can `dbg!` what it was given.
+mod debug_impls {
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub fn seen(entry: String) {
+        SEEN.with(|seen| seen.borrow_mut().push(entry));
+    }
+
+    pub fn take_seen() -> Vec<String> {
+        SEEN.with(|seen| std::mem::take(&mut *seen.borrow_mut()))
+    }
+
+    // Root { n } -> Root_A (initial) | Root_B. Root handles `GoB` (-> Root_B).
+
+    pub struct GoB;
+    impl Event for GoB {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Root {
+        pub n: u32,
+    }
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            seen(format!("{def:?}"));
+            let region = def.region::<Root_A>();
+            seen(format!("{region:?}"));
+            let region = region.child::<Root_B>();
+            seen(format!("{region:?}"));
+            def.trigger::<GoB>();
+            seen(format!("{def:?}"));
+        }
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            seen(format!("{ctx:?}"));
+        }
+    }
+    impl Trigger<GoB> for Root {
+        fn handle(&mut self, _: &GoB, ctx: &mut Context<Self>) {
+            ctx.transition(Root_B);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            seen(format!("{ctx:?}"));
+        }
+        fn on_exit(&mut self, ctx: &mut ExitContext<Self>) {
+            seen(format!("{ctx:?}"));
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_B;
+    impl State for Root_B {
+        type Parent = Root;
+    }
+}
+
+#[test]
+fn the_contexts_and_the_definition_implement_debug() {
+    use debug_impls::*;
+    let mut chart = Statechart::new(Root { n: 1 });
+    assert_eq!(
+        take_seen(),
+        [
+            r#"Definition { state: "introspection::debug_impls::Root", regions: 0, triggers: 0 }"#,
+            r#"Region { state: "introspection::debug_impls::Root", index: 0, children: 1 }"#,
+            r#"Region { state: "introspection::debug_impls::Root", index: 0, children: 2 }"#,
+            r#"Definition { state: "introspection::debug_impls::Root", regions: 1, triggers: 1 }"#,
+        ]
+    );
+    chart.update();
+    chart.trigger(GoB).unwrap();
+    assert_eq!(
+        take_seen(),
+        [
+            r#"Context { state: "introspection::debug_impls::Root", parent: None, .. }"#,
+            r#"Context { state: "introspection::debug_impls::Root_A", parent: Some(Root { n: 1 }), .. }"#,
+            r#"ExitContext { state: "introspection::debug_impls::Root_A", parent: Some(Root { n: 1 }), .. }"#,
+        ]
+    );
+    assert_eq!(chart.root().n, 1);
 }

@@ -4,6 +4,7 @@ use crate::engine::{Ctor, ErasedState, HandlerFn, ListedAt, RegisterFn, call_han
 use crate::state::State;
 use crate::trigger::{Event, Trigger};
 use std::any::{TypeId, type_name};
+use std::fmt;
 use std::marker::PhantomData;
 use std::panic::Location;
 
@@ -41,6 +42,18 @@ pub struct Definition<S> {
     regions: Vec<RegionDef>,
     triggers: Vec<(TypeId, HandlerFn)>,
     _state: PhantomData<fn() -> S>,
+}
+
+/// Prints the state's type and how many regions and triggers it has declared so far, e.g.
+/// `Definition { state: "my_crate::Player", regions: 2, triggers: 1 }`.
+impl<S> fmt::Debug for Definition<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Definition")
+            .field("state", &type_name::<S>())
+            .field("regions", &self.regions.len())
+            .field("triggers", &self.triggers.len())
+            .finish()
+    }
 }
 
 pub(crate) struct ChildDef {
@@ -149,10 +162,10 @@ impl<S: State> Definition<S> {
     /// so several triggers chain: `def.trigger::<Pause>().trigger::<Reset>();`.
     ///
     /// **This call is required.** Implementing [`Trigger<E>`] alone does nothing: without the
-    /// registration the handler is never called, the trigger bubbles past `S` to its ancestors,
-    /// and if none of them handles it the chart returns `Err(NotHandled)`. The library cannot
-    /// detect a forgotten registration, so register each trigger next to the regions in
-    /// [`define`](State::define).
+    /// registration the handler is never called, and on `S`'s branch the trigger bubbles on to
+    /// `S`'s ancestors. If no active state handles it (in any region), the chart returns
+    /// `Err(NotHandled)`. The library cannot detect a forgotten registration, so register each
+    /// trigger next to the regions in [`define`](State::define).
     ///
     /// The opposite mistake is a compile error: registering a trigger that `S` does not
     /// implement does not compile.
@@ -221,6 +234,19 @@ impl<S: State> Definition<S> {
 pub struct Region<'d, S> {
     /// The region being declared is the last one.
     def: &'d mut Definition<S>,
+}
+
+/// Prints the state's type, the region's index and how many children it has so far (the
+/// initial child included), e.g. `Region { state: "my_crate::Player", index: 1, children: 2 }`.
+impl<S> fmt::Debug for Region<'_, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let regions = &self.def.regions;
+        f.debug_struct("Region")
+            .field("state", &type_name::<S>())
+            .field("index", &regions.len().saturating_sub(1))
+            .field("children", &regions.last().map_or(0, |r| r.children.len()))
+            .finish()
+    }
 }
 
 impl<S: State> Region<'_, S> {

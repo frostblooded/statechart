@@ -73,9 +73,14 @@ fn test_timer_transitions_to_elapsed_after_duration() {
 #[test]
 fn test_timer_with_zero_duration_elapses_on_the_first_update() {
     let mut statechart = Statechart::new(Timer::new(Duration::ZERO));
-    assert!(statechart.get_debug_name().starts_with("Timer"));
+    // Not before: `new` only enters the chart.
+    assert!(statechart.is_active::<Timer_Active_Running>());
+    assert!(!statechart.is_active::<Timer_Elapsed>());
     statechart.update();
-    assert!(statechart.get_debug_name().ends_with("-> Timer_Elapsed"));
+    assert_eq!(
+        statechart.get_debug_name(),
+        "Timer { duration: 0ns } -> Timer_Elapsed"
+    );
 }
 
 #[test]

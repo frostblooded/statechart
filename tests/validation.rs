@@ -700,6 +700,35 @@ fn a_panic_while_the_root_restarts_keeps_the_new_root() {
     );
 }
 
+/// A restart detaches every region of the old root before it exits any of them, like every
+/// other transition detaches the subtree it exits. So a panic while region 0 is exited drops
+/// region 1 without `on_exit`, instead of leaving it active under the old root.
+#[test]
+fn a_panic_while_a_restart_exits_one_region_drops_the_other_regions_too() {
+    use mid_transition::*;
+    let mut chart = new_chart("exit Root_A_X");
+    expect_panic(|| chart.trigger(Restart).unwrap());
+    assert_eq!(take_log(), ["exit Root_A_X"]);
+    // The old root stays (the new root never took its place), without any active descendant.
+    assert_eq!(chart.get_debug_name(), "Root -> [(empty), (empty)]");
+    assert_eq!(chart.root().panic_in, "exit Root_A_X");
+    assert!(chart.is_active::<Root>());
+    assert!(!chart.is_active::<Root_A>());
+    assert!(!chart.is_active::<Root_P>());
+    assert!(chart.state::<Root_P>().is_none());
+    assert!(chart.get_recursive_active_type_ids().is_empty());
+
+    // Root_P is gone for good: nothing exits it later, and the next transition into region 0
+    // leaves region 1 empty.
+    chart.root_mut().panic_in = "";
+    chart.trigger(Reset).unwrap();
+    assert_eq!(take_log(), ["enter Root_A", "enter Root_A_X"]);
+    assert_eq!(
+        chart.get_debug_name(),
+        "Root -> [Root_A -> Root_A_X, (empty)]"
+    );
+}
+
 #[test]
 fn an_unlisted_target_requested_in_on_enter_during_a_transition_leaves_the_chart_consistent() {
     use mid_transition::*;

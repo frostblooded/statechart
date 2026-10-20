@@ -1,5 +1,6 @@
-//! Trigger dispatch on a single active chain: deepest handler wins, fallback walks every
-//! ancestor up to the root, typed outputs, payloads, and deferred transitions.
+//! Trigger dispatch on a single active chain: deepest handler wins, fallback to the nearest
+//! ancestor that handles it (up to the root, and no further than that ancestor), typed
+//! outputs, payloads, deferred transitions, and unregistered handlers (user decision D2).
 #![allow(non_camel_case_types)]
 
 use statechart::prelude::*;
@@ -18,6 +19,13 @@ impl Event for Ping {
 /// Handled by `Root` only: the leaf and its parent do not handle it.
 struct Deep;
 impl Event for Deep {
+    type Output = &'static str;
+}
+
+/// Handled by `Root_Mid` and by `Root`, not by the leaf: the fallback is a state in the middle
+/// of the chain, with an ancestor that handles the trigger too.
+struct Ask;
+impl Event for Ask {
     type Output = &'static str;
 }
 
@@ -68,6 +76,7 @@ impl State for Root {
         def.region::<Root_Mid>().child::<Root_Other>();
         def.trigger::<Ping>()
             .trigger::<Deep>()
+            .trigger::<Ask>()
             .trigger::<ForgottenWithFallback>();
     }
 }
@@ -83,6 +92,12 @@ impl Trigger<Deep> for Root {
         "Root"
     }
 }
+impl Trigger<Ask> for Root {
+    fn handle(&mut self, _: &Ask, _: &mut Context<Self>) -> &'static str {
+        self.calls += 1;
+        "Root"
+    }
+}
 
 #[derive(Debug, Default)]
 struct Root_Mid;
@@ -90,6 +105,12 @@ impl State for Root_Mid {
     type Parent = Root;
     fn define(def: &mut Definition<Self>) {
         def.region::<Root_Mid_Leaf>();
+        def.trigger::<Ask>();
+    }
+}
+impl Trigger<Ask> for Root_Mid {
+    fn handle(&mut self, _: &Ask, _: &mut Context<Self>) -> &'static str {
+        "Root_Mid"
     }
 }
 
@@ -163,6 +184,16 @@ fn fallback_skips_states_without_a_handler_up_to_the_root() {
     assert_eq!(chart.trigger(Deep), Ok("Root"));
     assert_eq!(chart.trigger_all(Deep), Ok(vec!["Root"]));
     assert_eq!(chart.root().calls, 2);
+}
+
+/// Spec item 3 when the handler is not a leaf: the nearest ancestor that handles the trigger
+/// runs, and it stops the bubbling, so `Root` (which handles `Ask` too) does not run.
+#[test]
+fn the_fallback_is_the_nearest_ancestor_that_handles_it_and_only_it_runs() {
+    let mut chart = Statechart::new(Root::default());
+    assert_eq!(chart.trigger_all(Ask), Ok(vec!["Root_Mid"]));
+    assert_eq!(chart.trigger(Ask), Ok("Root_Mid"));
+    assert_eq!(chart.root().calls, 0);
 }
 
 #[test]
