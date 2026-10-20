@@ -954,3 +954,6 @@ impl Registry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
