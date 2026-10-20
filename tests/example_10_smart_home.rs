@@ -50,9 +50,7 @@ use smart_home_security_armed_watching::SmartHome_Security_Armed_Watching;
 use smart_home_security_disarmed::SmartHome_Security_Disarmed;
 use statechart::prelude::*;
 use std::any::TypeId;
-use triggers::{
-    Arrive, Describe, FactoryReset, Leave, Motion, SetTemperature, ToggleFan,
-};
+use triggers::{Arrive, Describe, FactoryReset, Leave, Motion, SetTemperature, ToggleFan};
 
 fn home() -> Statechart<SmartHome> {
     Statechart::new(SmartHome::new(21, 21))

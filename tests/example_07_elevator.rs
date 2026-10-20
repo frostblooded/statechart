@@ -1,5 +1,5 @@
 // Runs the state code from the `07_elevator` example: four levels of nesting, `ancestor_mut`
-// from a deep state, children built from their parent's data (`region_with` / `child_with`),
+// from a deep state, a child built from its parent's data (`child_with`),
 // and transitions into states whose ancestors are not active yet.
 #![allow(non_camel_case_types)]
 
@@ -57,10 +57,7 @@ fn test_calls_outside_the_building_are_refused() {
     assert_eq!(chart.trigger(Call(3)), Ok(true));
     // Calling a floor twice queues it once.
     assert_eq!(chart.trigger(Call(3)), Ok(true));
-    assert_eq!(
-        chart.state::<Elevator_Service>().unwrap().queue,
-        [3]
-    );
+    assert_eq!(chart.state::<Elevator_Service>().unwrap().queue, [3]);
 }
 
 #[test]
@@ -94,7 +91,10 @@ fn test_calls_are_served_in_order_up_and_down() {
     chart.trigger(Call(0)).unwrap();
     chart.update();
     assert!(chart.is_active::<Elevator_Service_DoorsOpen>());
-    assert_eq!(chart.state::<Elevator_Service_DoorsOpen>().unwrap().ticks, 0);
+    assert_eq!(
+        chart.state::<Elevator_Service_DoorsOpen>().unwrap().ticks,
+        0
+    );
     updates(&mut chart, elevator_service_doors_open::OPEN_TICKS);
     chart.update();
     assert_eq!(chart.state::<Elevator_Service_Moving>().unwrap().target, 0);

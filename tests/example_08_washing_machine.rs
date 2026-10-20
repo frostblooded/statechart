@@ -86,7 +86,10 @@ fn test_the_cycle_moves_through_its_phases() {
         chart.update();
     }
     // The whole Running state, both regions, is gone.
-    assert_eq!(chart.get_debug_name(), "WashingMachine -> WashingMachine_Done");
+    assert_eq!(
+        chart.get_debug_name(),
+        "WashingMachine -> WashingMachine_Done"
+    );
 }
 
 #[test]

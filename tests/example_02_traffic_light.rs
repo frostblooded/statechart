@@ -50,6 +50,7 @@ fn test_cycles_red_green_yellow_red() {
         chart.get_debug_name(),
         "TrafficLight -> TrafficLight_Green { ticks: 0 }"
     );
+    assert!(chart.is_active::<TrafficLight_Green>());
     updates(&mut chart, traffic_light_green::DURATION);
     assert!(chart.is_active::<TrafficLight_Yellow>());
     updates(&mut chart, traffic_light_yellow::DURATION);
