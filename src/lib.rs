@@ -202,19 +202,28 @@
 //! * [`Statechart::new`](statechart::Statechart::new) enters the root and then every initial
 //!   descendant.
 //! * `on_enter` runs parent before child, initial children included, regions in declaration
-//!   order. A child the library builds itself (an initial child, or an inactive ancestor of a
-//!   transition target) is built right after its parent's `on_enter`, so a constructor given to
-//!   `region_with` / `child_with` sees the parent's data as `on_enter` left it.
+//!   order: a region's whole subtree is entered before the next region.
+//! * A child the library builds itself (an initial child, or an inactive ancestor of a
+//!   transition target) is built when its region is entered: after its parent's `on_enter`, and
+//!   after every earlier region of the parent has been entered. A constructor given to
+//!   `region_with` / `child_with` sees the parent's data as it is at that moment, including
+//!   changes made by the `on_enter` hooks of earlier regions (through `parent_mut`) and, for a
+//!   transition into an already active parent, everything done since that parent was entered.
 //! * `on_exit` runs deepest first: a state's descendants exit (regions in declaration order)
-//!   before the state itself.
+//!   before the state itself. Each state is dropped right after its own `on_exit`, before
+//!   anything new is entered. Dropping the chart drops the active states (deepest first)
+//!   without running `on_exit`.
 //! * `update` runs parent before children, regions in declaration order.
+//! * A panic in a hook propagates to the caller and leaves the chart consistent and usable; see
+//!   [Panics in hooks](statechart::Statechart#panics-in-hooks).
 //!
 //! # Transitions
 //!
 //! A transition targets any state of the same chart, at any depth. Applying it:
 //!
-//! 1. finds the least common ancestor (LCA): the deepest active state on the target's path
-//!    from the root;
+//! 1. finds the least common ancestor (LCA): the deepest active state on the path from the root
+//!    to the target, the target itself excluded (so the LCA is always a strict ancestor of the
+//!    target);
 //! 2. exits the active subtree of the LCA's region that leads to the target (deepest first);
 //! 3. enters every state from there down to the target, parent first. Inactive ancestors of the
 //!    target are built with the constructor their parent registered, the target is the instance
@@ -222,9 +231,10 @@
 //!
 //! Only that one region of the LCA changes: the LCA itself, its other regions and everything
 //! above it are untouched. So a transition into one region of an active parallel state leaves
-//! its sibling regions alone, while targeting the parallel state itself exits and re-enters all
-//! of its regions. Targeting an active state is an external self-transition: it is exited and
-//! entered again. Targeting the root type restarts the whole chart.
+//! its sibling regions alone, while targeting the parallel state itself (whose parent is then
+//! the LCA) exits and re-enters all of its regions. Targeting an active state is an external
+//! self-transition: it is exited and entered again. Targeting the root type restarts the whole
+//! chart.
 //!
 //! Transitions are requested from `update`, `on_enter` and trigger handlers (`on_exit` gets an
 //! [`ExitContext`](context::ExitContext), which cannot request them). Nothing changes in the
@@ -236,15 +246,16 @@
 //! * a request is dropped if the state instance that made it has been exited by an earlier
 //!   transition in the same batch;
 //! * more than 10 000 transitions in one batch panic, which catches `on_enter` hooks that keep
-//!   requesting transitions in a cycle.
+//!   requesting transitions in a cycle (the message names the last request).
 //!
 //! # Introspection
 //!
 //! * `format!("{chart:?}")` and [`get_debug_name`](statechart::Statechart::get_debug_name)
 //!   print the active configuration with each state's own `Debug`: `"A -> A_B"` for a single
 //!   chain, `"A -> [A_B -> A_B_X, A_C]"` for parallel regions.
-//! * [`is_active::<T>()`](statechart::Statechart::is_active) and
-//!   [`state::<T>()`](statechart::Statechart::state) query one state type.
+//! * [`is_active::<T>()`](statechart::Statechart::is_active),
+//!   [`state::<T>()`](statechart::Statechart::state) and
+//!   [`state_mut::<T>()`](statechart::Statechart::state_mut) query one state type.
 //! * [`get_recursive_active_type_ids`](statechart::Statechart::get_recursive_active_type_ids)
 //!   lists the active states below the root, deepest first.
 //!
@@ -254,13 +265,23 @@
 //! state of another chart, registering a trigger the state does not implement, calling
 //! `parent()` on the root, or requesting a transition in `on_exit`. A few are panics when the
 //! chart is built, in debug and release builds alike: a state type that appears more than once
-//! in the hierarchy, a trigger registered twice, or a composite state registered without a
-//! constructor. A transition to a state that its parent does not list panics in the hook that
-//! requests it, before anything changes.
+//! in the hierarchy and a trigger registered twice (both reported at the offending line in
+//! `define`), or a composite state registered without a constructor (the message names the
+//! line). A transition to a state that is not reachable through the `define` functions (its
+//! parent, or one of its ancestors' parents, does not list it) panics in the hook that requests
+//! it, naming the missing link. From `update` or a trigger handler that is before anything
+//! changes; from `on_enter` during a transition it interrupts that transition, like any panic
+//! in a hook.
 //!
 //! One mistake cannot be detected: implementing `Trigger<E>` but forgetting
 //! `def.trigger::<E>()`. That handler never runs, and the trigger is `Err(NotHandled)` unless
 //! another active state handles it.
+//!
+//! # Limitations
+//!
+//! A [`Statechart`](statechart::Statechart) is neither `Send` nor `Sync`, hooks cannot fire
+//! triggers (there are no internal events), and states are `'static`. See
+//! [Limitations](statechart::Statechart#limitations).
 //!
 //! # Imports
 //!

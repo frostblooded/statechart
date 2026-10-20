@@ -85,6 +85,15 @@ impl State for Root_Mid_Left {
     }
 
     fn on_exit(&mut self, ctx: &mut ExitContext<Self>) {
+        // The read-only accessors work in on_exit too.
+        assert!(std::ptr::eq(
+            ctx.parent(),
+            ctx.ancestor::<Root_Mid>().unwrap()
+        ));
+        assert!(ctx.ancestor::<Root_Mid_Left>().is_none());
+        // `ancestor_mut` is `None` for the state itself and for other regions.
+        assert!(ctx.ancestor_mut::<Root_Mid_Left>().is_none());
+        assert!(ctx.ancestor_mut::<Root_Mid_Right>().is_none());
         // Ancestors are still active (and mutable) while a state is exited.
         ctx.parent_mut().hits += 100;
         ctx.ancestor_mut::<Root>()

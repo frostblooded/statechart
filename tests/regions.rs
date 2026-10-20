@@ -358,3 +358,183 @@ fn handler_transitions_apply_after_the_whole_dispatch() {
     assert_eq!(chart.get_debug_name(), "Duo -> [Duo_Left, Duo_Right2]");
     assert_eq!(chart.trigger_all(Swap), Ok(vec!["Duo_Left"]));
 }
+
+#[test]
+fn trigger_runs_every_eligible_handler_and_returns_the_first_output() {
+    let mut chart = new_player();
+    chart.trigger(Walk).unwrap();
+    // Region 0 is handled by Player_Walking; region 1 bubbles up to Player, whose handler
+    // also runs although `trigger` only returns the first output.
+    assert_eq!(chart.trigger(Tick), Ok("Player_Walking"));
+    assert_eq!(chart.root().ticks_handled, 1);
+}
+
+mod post_order_requests {
+    use super::*;
+
+    // Pair
+    // ├── region 0: Pair_Left (initial)               handles Go -> Pair_Right2
+    // └── region 1: Pair_Right (initial), Pair_Right2, Pair_Right3
+    // Pair handles Go (on behalf of region 1) -> Pair_Right3
+
+    pub struct Go;
+    impl Event for Go {
+        type Output = &'static str;
+    }
+
+    #[derive(Debug)]
+    pub struct Pair;
+    impl State for Pair {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Pair_Left>();
+            def.region::<Pair_Right>()
+                .child::<Pair_Right2>()
+                .child::<Pair_Right3>();
+            def.trigger::<Go>();
+        }
+    }
+    impl Trigger<Go> for Pair {
+        fn handle(&mut self, _: &Go, ctx: &mut Context<Self>) -> &'static str {
+            ctx.transition(Pair_Right3);
+            "Pair"
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Pair_Left;
+    impl State for Pair_Left {
+        type Parent = Pair;
+        fn define(def: &mut Definition<Self>) {
+            def.trigger::<Go>();
+        }
+    }
+    impl Trigger<Go> for Pair_Left {
+        fn handle(&mut self, _: &Go, ctx: &mut Context<Self>) -> &'static str {
+            ctx.transition(Pair_Right2);
+            "Pair_Left"
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Pair_Right;
+    impl State for Pair_Right {
+        type Parent = Pair;
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Pair_Right2;
+    impl State for Pair_Right2 {
+        type Parent = Pair;
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Pair_Right3;
+    impl State for Pair_Right3 {
+        type Parent = Pair;
+        logging_hooks!();
+    }
+}
+
+#[test]
+fn an_ancestors_handler_request_applies_after_its_descendants_requests() {
+    use post_order_requests::*;
+    let mut chart = Statechart::new(Pair);
+    common::take_log();
+    // Pair's handler runs after Pair_Left's, so its request is applied last.
+    assert_eq!(chart.trigger_all(Go), Ok(vec!["Pair_Left", "Pair"]));
+    assert_eq!(
+        take_log_without_updates(),
+        [
+            "exit Pair_Right",
+            "enter Pair_Right2",
+            "exit Pair_Right2",
+            "enter Pair_Right3"
+        ]
+    );
+    assert_eq!(chart.get_debug_name(), "Pair -> [Pair_Left, Pair_Right3]");
+}
+
+mod desk {
+    use super::*;
+
+    // Desk
+    // ├── region 0: Desk_Lamp (initial)
+    // └── region 1: Desk_Drawer (initial)
+    //     Desk_Drawer
+    //     └── region: Desk_Drawer_Shut (initial), Desk_Drawer_Open
+
+    /// `Desk_Drawer_Shut` -> `Desk_Drawer_Open`.
+    pub struct Open;
+    impl Event for Open {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Desk;
+    impl State for Desk {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Desk_Lamp>();
+            def.region::<Desk_Drawer>();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Desk_Lamp;
+    impl State for Desk_Lamp {
+        type Parent = Desk;
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Desk_Drawer;
+    impl State for Desk_Drawer {
+        type Parent = Desk;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Desk_Drawer_Shut>().child::<Desk_Drawer_Open>();
+        }
+        logging_hooks!();
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Desk_Drawer_Shut;
+    impl State for Desk_Drawer_Shut {
+        type Parent = Desk_Drawer;
+        fn define(def: &mut Definition<Self>) {
+            def.trigger::<Open>();
+        }
+        logging_hooks!();
+    }
+    impl Trigger<Open> for Desk_Drawer_Shut {
+        fn handle(&mut self, _: &Open, ctx: &mut Context<Self>) {
+            ctx.transition(Desk_Drawer_Open);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Desk_Drawer_Open;
+    impl State for Desk_Drawer_Open {
+        type Parent = Desk_Drawer;
+        logging_hooks!();
+    }
+}
+
+#[test]
+fn a_transition_below_an_active_state_of_a_later_region_keeps_that_state() {
+    use desk::*;
+    let mut chart = Statechart::new(Desk);
+    common::take_log();
+    chart.trigger(Open).unwrap();
+    // Desk_Drawer (region 1) is the LCA: it is neither exited nor entered again.
+    assert_eq!(
+        take_log_without_updates(),
+        ["exit Desk_Drawer_Shut", "enter Desk_Drawer_Open"]
+    );
+    assert_eq!(
+        chart.get_debug_name(),
+        "Desk -> [Desk_Lamp, Desk_Drawer -> Desk_Drawer_Open]"
+    );
+}

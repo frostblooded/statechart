@@ -222,9 +222,24 @@ fn requests_in_independent_regions_all_apply() {
 
 #[test]
 fn conflicting_requests_apply_in_request_order() {
-    let (chart, _) = run(Plan::SameRegionInOrder);
+    let (chart, log) = run(Plan::SameRegionInOrder);
     // Root_Left_Inner asked for Root_Left2 first; Root_Right (not exited) then asked for
-    // Root_Left_Inner2, which re-enters Root_Left and replaces Root_Left2.
+    // Root_Left_Inner2, which re-enters Root_Left and replaces Root_Left2. (Applied in the
+    // opposite order, Root_Left_Inner's request would be dropped and the configuration would be
+    // the same: only the hooks tell the two apart.)
+    assert_eq!(
+        log.into_iter()
+            .filter(|l| !l.starts_with("update"))
+            .collect::<Vec<_>>(),
+        [
+            "exit Root_Left_Inner",
+            "exit Root_Left",
+            "enter Root_Left2",
+            "exit Root_Left2",
+            "enter Root_Left",
+            "enter Root_Left_Inner2"
+        ]
+    );
     assert_eq!(
         chart.get_debug_name(),
         "Root { plan: SameRegionInOrder } -> [Root_Left -> Root_Left_Inner2, Root_Right]"

@@ -11,10 +11,11 @@ pub struct Timer_Active {
     pub remaining: Duration,
 }
 
-// Rounds `remaining` to a tenth, so the active chain stays readable.
+// Prints `remaining` in seconds, rounded to a tenth, so the active chain stays readable.
 impl fmt::Debug for Timer_Active {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Timer_Active {{ remaining: {:.1?} }}", self.remaining)
+        let seconds = self.remaining.as_secs_f64();
+        write!(f, "Timer_Active {{ remaining: {seconds:.1}s }}")
     }
 }
 

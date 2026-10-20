@@ -1,6 +1,6 @@
 //! The [`Statechart`]: owns the active configuration and runs updates, triggers and transitions.
 
-use crate::engine::{Dispatch, Nil, Node, Registry, Runtime};
+use crate::engine::{Dispatch, Nil, Node, Registry, Runtime, Sink};
 use crate::state::{InChart, NoParent, State};
 use crate::trigger::{Event, NotHandled};
 use std::any::TypeId;
@@ -12,7 +12,8 @@ use std::marker::PhantomData;
 /// The chart owns the active configuration: the root and, for each region of each active
 /// state, its one active child. It is driven from outside with [`update`](Self::update),
 /// [`trigger`](Self::trigger) and [`trigger_all`](Self::trigger_all), and inspected with
-/// [`is_active`](Self::is_active), [`state`](Self::state), [`root`](Self::root),
+/// [`is_active`](Self::is_active), [`state`](Self::state) / [`state_mut`](Self::state_mut),
+/// [`root`](Self::root) / [`root_mut`](Self::root_mut),
 /// [`get_debug_name`](Self::get_debug_name) (or `{:?}`) and
 /// [`get_recursive_active_type_ids`](Self::get_recursive_active_type_ids).
 ///
@@ -62,6 +63,44 @@ use std::marker::PhantomData;
 ///
 /// Statechart::new(Timer_Elapsed); // error: expected `NoParent`, found `Timer`
 /// ```
+///
+/// # When states are dropped
+///
+/// A state's struct is dropped right after its `on_exit`, deepest first, before any state of
+/// the same transition is entered. So a state that holds a resource (a socket, a file lock, an
+/// audio handle) releases it before the state that replaces it, or the new instance of an
+/// external self-transition, runs its `on_enter`. Dropping the `Statechart` drops every active
+/// state, deepest first, **without** running `on_exit`.
+///
+/// # Panics in hooks
+///
+/// A panic in a hook (or in a constructor given to `region_with` / `child_with`) propagates to
+/// the caller of [`new`](Self::new), [`update`](Self::update), [`trigger`](Self::trigger) or
+/// [`trigger_all`](Self::trigger_all). If the caller catches it, the chart stays consistent and
+/// usable:
+///
+/// * a panic in `update` or in a trigger handler changes nothing: the transitions requested so
+///   far are discarded;
+/// * a panic while a transition is applied stops that transition (and the rest of the batch)
+///   where it was. States already exited stay exited, and the rest of the subtree that was
+///   being exited is dropped without `on_exit`. A state whose `on_enter` panicked counts as
+///   entered; states not entered yet are not entered. A region left without a new state is
+///   **empty**: it has no active state (printed as `(empty)`), updates skip it, a trigger
+///   bubbles from it straight to its parent, and the next transition to one of its states (or
+///   to an ancestor) enters it again. A restart (a transition to the root type) never leaves
+///   the chart without a root: the old root stays until its descendants are exited, then the
+///   new root takes its place.
+///
+/// Either way [`is_active`](Self::is_active), [`state`](Self::state) and the `Debug` output
+/// agree, no state's `on_exit` runs twice, and requests made by the remaining states are
+/// applied as usual.
+///
+/// # Limitations
+///
+/// * `Statechart` is neither `Send` nor `Sync`, whatever the states are: it stores states as
+///   `Box<dyn ...>` without a `Send` bound. Keep a chart on the thread that created it.
+/// * Hooks cannot fire triggers (there are no internal events); they request transitions.
+/// * States are `'static` (they cannot borrow), because they are stored as `dyn Any`.
 pub struct Statechart<R> {
     root: Node,
     registry: Registry,
@@ -79,12 +118,16 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     ///
     /// These checks run in debug and release builds alike:
     ///
-    /// * if a state type appears more than once in the hierarchy (for example, a parent lists
-    ///   the same child twice), with the message
-    ///   ``State type `X` appears more than once in the statechart hierarchy``;
+    /// * if a state type appears more than once in the hierarchy (a parent lists the same child
+    ///   twice), with the message ``State type `X` appears more than once in the statechart
+    ///   hierarchy: `P` lists it twice in `define` ``, reported at the second listing;
     /// * if a state with regions is registered with
     ///   [`child_explicit`](crate::definition::Region::child_explicit);
-    /// * if a state registers the same trigger twice.
+    /// * if a state registers the same trigger twice;
+    /// * if the `on_enter` hooks keep requesting transitions in a cycle (more than 10 000
+    ///   transitions in one batch).
+    ///
+    /// A panic in a hook propagates (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn new(root: R) -> Self {
         let registry = Registry::build::<R>();
         let mut runtime = Runtime::default();
@@ -104,6 +147,13 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// Nothing changes while the hooks run. Afterwards the requests are applied in request
     /// order; a request is dropped if an earlier transition of the batch exited the state that
     /// made it, and requests made by `on_enter` hooks during the batch are appended to it.
+    ///
+    /// # Panics
+    ///
+    /// If the `on_enter` hooks keep requesting transitions in a cycle (more than 10 000
+    /// transitions in one batch), or if a hook requests a transition to a state its parent does
+    /// not list ([`Context::transition`](crate::context::Context::transition)). A panic in a hook
+    /// propagates (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn update(&mut self) {
         self.runtime.requests.clear();
         self.registry
@@ -121,9 +171,27 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// Returns `Err(NotHandled)` if no active state registered `E` with
     /// [`def.trigger::<E>()`](crate::definition::Definition::trigger). A state that implements
     /// [`Trigger<E>`](crate::trigger::Trigger) without registering it does not count.
+    ///
+    /// Only types implementing [`Event`] are triggers:
+    ///
+    /// ```compile_fail,E0277
+    /// # use statechart::prelude::*;
+    /// #[derive(Debug)] struct Timer;
+    /// impl State for Timer { type Parent = NoParent; }
+    /// struct NotEvent;
+    /// let mut chart = Statechart::new(Timer);
+    /// chart.trigger(NotEvent); // error: `NotEvent` is not a trigger
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Like [`update`](Self::update), when the transitions requested by the handlers are
+    /// applied.
     pub fn trigger<E: Event>(&mut self, trigger: E) -> Result<E::Output, NotHandled> {
-        self.trigger_all(trigger)
-            .map(|outputs| outputs.into_iter().next().expect("never empty"))
+        match self.dispatch(trigger, Sink::First(None)) {
+            Sink::First(Some(output)) => Ok(output),
+            _ => Err(NotHandled),
+        }
     }
 
     /// Fires a trigger and returns the outputs of every handler that ran, in the order they ran:
@@ -131,9 +199,22 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// vector is never empty: no handler at all is `Err(NotHandled)`.
     ///
     /// Transitions requested by the handlers are applied after the whole dispatch.
+    ///
+    /// # Panics
+    ///
+    /// Like [`update`](Self::update), when the transitions requested by the handlers are
+    /// applied.
     pub fn trigger_all<E: Event>(&mut self, trigger: E) -> Result<Vec<E::Output>, NotHandled> {
+        match self.dispatch(trigger, Sink::All(Vec::new())) {
+            Sink::All(outputs) if !outputs.is_empty() => Ok(outputs),
+            _ => Err(NotHandled),
+        }
+    }
+
+    /// Runs every eligible handler of `trigger` into `sink`, then applies the requested
+    /// transitions.
+    fn dispatch<E: Event>(&mut self, trigger: E, mut sink: Sink<E::Output>) -> Sink<E::Output> {
         self.runtime.requests.clear();
-        let mut outputs: Vec<E::Output> = Vec::new();
         self.registry.dispatch(
             &mut self.runtime,
             &mut self.root,
@@ -141,15 +222,11 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
             &mut Dispatch {
                 event_ty: TypeId::of::<E>(),
                 event: &trigger,
-                outputs: &mut outputs,
+                outputs: &mut sink,
             },
         );
         self.registry.run_batch(&mut self.runtime, &mut self.root);
-        if outputs.is_empty() {
-            Err(NotHandled)
-        } else {
-            Ok(outputs)
-        }
+        sink
     }
 
     /// Whether a state of type `T` is active. `T` must belong to this chart (compile-time):
@@ -170,11 +247,32 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
         self.runtime.is_live(TypeId::of::<T>())
     }
 
-    /// The data of the state `T`, if it is active.
+    /// The data of the state `T`, if it is active. `T` must belong to this chart:
+    ///
+    /// ```compile_fail,E0277
+    /// # #![allow(non_camel_case_types)]
+    /// # use statechart::prelude::*;
+    /// #[derive(Debug)] struct Timer;
+    /// #[derive(Debug)] struct Door;
+    /// #[derive(Debug, Default)] struct Door_Open;
+    /// impl State for Timer { type Parent = NoParent; }
+    /// impl State for Door { type Parent = NoParent; fn define(d: &mut Definition<Self>) { d.region::<Door_Open>(); } }
+    /// impl State for Door_Open { type Parent = Door; }
+    /// let chart = Statechart::new(Timer);
+    /// chart.state::<Door_Open>(); // error: `Door_Open` belongs to the `Door` chart
+    /// ```
     pub fn state<T: InChart<R>>(&self) -> Option<&T> {
         self.registry
             .find_active(&self.root, TypeId::of::<T>())
             .and_then(|node| node.state.as_any().downcast_ref())
+    }
+
+    /// The data of the state `T`, mutably, if it is active. Changing a state's data never
+    /// changes which states are active.
+    pub fn state_mut<T: InChart<R>>(&mut self) -> Option<&mut T> {
+        self.registry
+            .find_active_mut(&mut self.root, TypeId::of::<T>())
+            .and_then(|node| node.state.as_any_mut().downcast_mut())
     }
 
     /// The root state's data.
@@ -197,7 +295,8 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
 
     /// The active configuration: `"A -> A_B"` for a single chain, `"A -> [A_B -> A_B_X, A_C]"`
     /// for a state with parallel regions. Each state prints with its own `Debug`. Same as
-    /// `format!("{chart:?}")`.
+    /// `format!("{chart:?}")`. A region left without an active state by a panicking hook prints
+    /// as `(empty)` (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn get_debug_name(&self) -> String {
         format!("{self:?}")
     }

@@ -51,6 +51,13 @@ impl Event for Forgotten {
     type Output = ();
 }
 
+/// Registered by `Root`; the leaf implements `Trigger<ForgottenWithFallback>` but never
+/// registers it.
+struct ForgottenWithFallback;
+impl Event for ForgottenWithFallback {
+    type Output = &'static str;
+}
+
 #[derive(Debug, Default)]
 struct Root {
     calls: u32,
@@ -59,7 +66,9 @@ impl State for Root {
     type Parent = NoParent;
     fn define(def: &mut Definition<Self>) {
         def.region::<Root_Mid>().child::<Root_Other>();
-        def.trigger::<Ping>().trigger::<Deep>();
+        def.trigger::<Ping>()
+            .trigger::<Deep>()
+            .trigger::<ForgottenWithFallback>();
     }
 }
 impl Trigger<Ping> for Root {
@@ -115,6 +124,17 @@ impl Trigger<Leave> for Root_Mid_Leaf {
 impl Trigger<Forgotten> for Root_Mid_Leaf {
     fn handle(&mut self, _: &Forgotten, _: &mut Context<Self>) {
         panic!("an unregistered handler must never run");
+    }
+}
+// Deliberately NOT registered in `Root_Mid_Leaf::define` either.
+impl Trigger<ForgottenWithFallback> for Root_Mid_Leaf {
+    fn handle(&mut self, _: &ForgottenWithFallback, _: &mut Context<Self>) -> &'static str {
+        panic!("an unregistered handler must never run");
+    }
+}
+impl Trigger<ForgottenWithFallback> for Root {
+    fn handle(&mut self, _: &ForgottenWithFallback, _: &mut Context<Self>) -> &'static str {
+        "Root"
     }
 }
 
@@ -183,6 +203,15 @@ fn an_implemented_but_unregistered_handler_never_runs_and_is_not_handled() {
     let mut chart = Statechart::new(Root::default());
     assert_eq!(chart.trigger(Forgotten), Err(NotHandled));
     assert_eq!(chart.trigger_all(Forgotten), Err(NotHandled));
+}
+
+/// User decision D2, the other half: the unregistered handler is skipped, so the trigger falls
+/// back to an ancestor that registered it.
+#[test]
+fn an_unregistered_handler_is_skipped_and_the_trigger_falls_back_to_an_ancestor() {
+    let mut chart = Statechart::new(Root::default());
+    assert_eq!(chart.trigger(ForgottenWithFallback), Ok("Root"));
+    assert_eq!(chart.trigger_all(ForgottenWithFallback), Ok(vec!["Root"]));
 }
 
 #[test]

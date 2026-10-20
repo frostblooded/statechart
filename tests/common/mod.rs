@@ -1,6 +1,6 @@
 //! Helpers shared by the integration tests: a per-thread event log (each test runs on its own
 //! thread, so tests do not see each other's entries).
-#![allow(dead_code)]
+#![allow(dead_code, unused_macros)]
 
 use std::cell::RefCell;
 

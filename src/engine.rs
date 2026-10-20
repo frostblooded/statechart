@@ -3,11 +3,12 @@
 
 use crate::context::{Context, ExitContext, Hook};
 use crate::definition::Definition;
-use crate::state::State;
+use crate::state::{NoParent, State};
 use crate::trigger::{Event, Trigger};
 use std::any::{Any, TypeId, type_name};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Debug};
+use std::panic::Location;
 
 // ---------------------------------------------------------------------------------------------
 // Erased states
@@ -159,11 +160,16 @@ impl Runtime {
 /// Builds a child from its (already entered) parent.
 pub(crate) type Ctor = Box<dyn Fn(&dyn ErasedState) -> Box<dyn ErasedState>>;
 
-/// Runs one state's handler for one trigger type and appends the output to a `Vec<E::Output>`.
+/// Runs one state's handler for one trigger type and puts the output into a
+/// [`Sink<E::Output>`](Sink).
 pub(crate) type HandlerFn = fn(&mut dyn ErasedState, &dyn Any, &mut dyn Any, Hook<'_>);
 
+/// Where a child was listed in its parent's `define`.
+pub(crate) type ListedAt = &'static Location<'static>;
+
 /// Registers a child type (monomorphised `register::<C>`); returns its registry index.
-pub(crate) type RegisterFn = fn(&mut Registry, Option<usize>, usize, Option<Ctor>) -> usize;
+pub(crate) type RegisterFn =
+    fn(&mut Registry, Option<usize>, usize, Option<Ctor>, Option<ListedAt>) -> usize;
 
 /// Upper bound on transitions applied in one batch; catches `on_enter` hooks that keep
 /// requesting transitions in a cycle.
@@ -171,6 +177,7 @@ pub(crate) const MAX_TRANSITIONS_PER_BATCH: usize = 10_000;
 
 struct StateInfo {
     ty: TypeId,
+    name: &'static str,
     /// Index of this state's region in its parent.
     region_in_parent: usize,
     /// Registry index of each region's initial child.
@@ -190,17 +197,19 @@ pub(crate) struct Registry {
 }
 
 /// Registers `S` (and, recursively, everything its `define` declares); returns its index.
+/// `listed_at` is where the parent listed `S` (`None` for the root).
 pub(crate) fn register<S: State>(
     reg: &mut Registry,
     parent: Option<usize>,
     region_in_parent: usize,
     ctor: Option<Ctor>,
+    listed_at: Option<ListedAt>,
 ) -> usize {
     let ty = TypeId::of::<S>();
     // Spec item 11, always on (user decision D1). `child::<C>()` only compiles when
     // `C::Parent == Self`, so the only way to get here twice is a parent listing the same child
-    // twice (in one region or in two). The check costs one hash lookup per state, once per
-    // `Statechart::new`, and a duplicate would make transition targets ambiguous.
+    // twice (in one region or in two), which `Definition` already reports at the offending
+    // line. This is the backstop: one hash lookup per state, once per `Statechart::new`.
     assert!(
         !reg.index.contains_key(&ty),
         "State type `{}` appears more than once in the statechart hierarchy",
@@ -211,13 +220,15 @@ pub(crate) fn register<S: State>(
     S::define(&mut def);
     let (regions, triggers) = def.into_parts();
 
-    assert!(
-        parent.is_none() || ctor.is_some() || regions.is_empty(),
-        "State `{0}` has regions but was registered with `child_explicit`: a composite state can \
-         be entered on the way to one of its descendants, so it needs a constructor; use \
-         `child::<{0}>()` (requires `Default`) or `child_with(...)`",
-        type_name::<S>()
-    );
+    if parent.is_some() && ctor.is_none() && !regions.is_empty() {
+        panic!(
+            "State `{0}` has regions but was registered with `child_explicit`: a composite state \
+             can be entered on the way to one of its descendants, so it needs a constructor; use \
+             `child::<{0}>()` (requires `Default`) or `child_with(...)`; it is registered at {1}",
+            type_name::<S>(),
+            listed_at.expect("every child is listed somewhere"),
+        );
+    }
 
     let idx = reg.states.len();
     let path = match parent {
@@ -226,6 +237,7 @@ pub(crate) fn register<S: State>(
     };
     reg.states.push(StateInfo {
         ty,
+        name: type_name::<S>(),
         region_in_parent,
         regions: Vec::with_capacity(regions.len()),
         triggers,
@@ -237,13 +249,32 @@ pub(crate) fn register<S: State>(
     for (region, def) in regions.into_iter().enumerate() {
         let mut initial = None;
         for child in def.children {
-            let child_idx = (child.register)(reg, Some(idx), region, child.ctor);
+            let child_idx =
+                (child.register)(reg, Some(idx), region, child.ctor, Some(child.listed_at));
             initial.get_or_insert(child_idx);
         }
         let initial = initial.expect("a region is declared by naming its initial child");
         reg.states[idx].regions.push(initial);
     }
     idx
+}
+
+/// Collects the outputs of a trigger's handlers: `trigger` keeps the first one (without
+/// allocating), `trigger_all` every one. Every eligible handler runs either way.
+pub(crate) enum Sink<O> {
+    First(Option<O>),
+    All(Vec<O>),
+}
+
+impl<O> Sink<O> {
+    fn put(&mut self, output: O) {
+        match self {
+            Sink::First(first) => {
+                first.get_or_insert(output);
+            }
+            Sink::All(all) => all.push(output),
+        }
+    }
 }
 
 /// Type-erased trigger handler for `S: Trigger<E>`.
@@ -259,16 +290,16 @@ pub(crate) fn call_handler<S: Trigger<E>, E: Event>(
         .expect("handler registered for another state type");
     let event = event.downcast_ref::<E>().expect("event type mismatch");
     let outputs = outputs
-        .downcast_mut::<Vec<E::Output>>()
+        .downcast_mut::<Sink<E::Output>>()
         .expect("output type mismatch");
-    outputs.push(state.handle(event, &mut Context::new(hook)));
+    outputs.put(state.handle(event, &mut Context::new(hook)));
 }
 
 /// A trigger being dispatched.
 pub(crate) struct Dispatch<'e> {
     pub(crate) event_ty: TypeId,
     pub(crate) event: &'e dyn Any,
-    /// A `Vec<E::Output>`.
+    /// A `Sink<E::Output>`.
     pub(crate) outputs: &'e mut dyn Any,
 }
 
@@ -277,13 +308,42 @@ pub(crate) struct Dispatch<'e> {
 // ---------------------------------------------------------------------------------------------
 
 /// An active state and the active child of each of its regions (`regions[i]` is region `i`).
+///
+/// A region whose state is being exited or entered holds a [vacant](Node::vacant) node while
+/// that happens. It is never seen by a hook, and only stays in the tree if a hook (or a
+/// constructor) panics in the middle of a transition: the region then has no active state
+/// until a later transition enters one.
 pub(crate) struct Node {
     pub(crate) state: Box<dyn ErasedState>,
-    /// Registry index of the state's type.
+    /// Registry index of the state's type ([`VACANT`] for a vacant node).
     idx: usize,
     /// Instance id.
     id: u64,
     regions: Vec<Node>,
+}
+
+/// The `idx` of a vacant node.
+const VACANT: usize = usize::MAX;
+
+/// The state of a vacant node. Never entered, exited, updated or dispatched to.
+struct Vacant;
+
+impl Debug for Vacant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(empty)")
+    }
+}
+
+impl State for Vacant {
+    type Parent = NoParent;
+}
+
+impl Drop for Node {
+    /// Drops the descendants first, deepest first and regions in declaration order (the order
+    /// `on_exit` runs in), then the state itself.
+    fn drop(&mut self) {
+        self.regions.clear();
+    }
 }
 
 impl Debug for Node {
@@ -307,11 +367,63 @@ impl Debug for Node {
 }
 
 impl Node {
+    /// A region with no active state. Allocates nothing.
+    fn vacant() -> Self {
+        Node {
+            state: Box::new(Vacant),
+            idx: VACANT,
+            id: 0,
+            regions: Vec::new(),
+        }
+    }
+
+    fn is_vacant(&self) -> bool {
+        self.idx == VACANT
+    }
+
     /// Post-order (deepest first within a branch, regions in declaration order), excluding self.
     pub(crate) fn collect_descendant_types(&self, out: &mut Vec<TypeId>) {
-        for child in &self.regions {
+        for child in self.regions.iter().filter(|child| !child.is_vacant()) {
             child.collect_descendant_types(out);
             out.push(child.state.as_any().type_id());
+        }
+    }
+}
+
+/// While states are entered: the rest of the path to a transition target below the state being
+/// entered (empty when only initial children are entered), and the target's instance, taken
+/// when its turn comes.
+struct Towards<'t> {
+    path: &'t [usize],
+    target: &'t mut Option<Box<dyn ErasedState>>,
+}
+
+impl<'t> Towards<'t> {
+    /// Only initial children.
+    fn nowhere(target: &'t mut Option<Box<dyn ErasedState>>) -> Self {
+        Towards { path: &[], target }
+    }
+}
+
+/// Re-synchronises the live set with the tree if a batch is interrupted by a panic in a hook.
+///
+/// Every state in the tree has been entered (at least partly) and not exited, because a state
+/// is placed in the tree when it is entered and detached before it is exited. But a state whose
+/// exit was interrupted, or a detached descendant that was never exited, may still be in the
+/// live set. Rebuilding the live set from the tree runs no user code, so it is safe during
+/// unwinding.
+struct ResyncOnUnwind<'a> {
+    reg: &'a Registry,
+    rt: &'a mut Runtime,
+    root: &'a mut Node,
+    armed: bool,
+}
+
+impl Drop for ResyncOnUnwind<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.rt.live.clear();
+            self.reg.mark_live(self.rt, self.root);
         }
     }
 }
@@ -320,8 +432,24 @@ impl Registry {
     /// Registers the whole hierarchy below the root `R`.
     pub(crate) fn build<R: State>() -> Self {
         let mut reg = Registry::default();
-        register::<R>(&mut reg, None, 0, None);
+        register::<R>(&mut reg, None, 0, None, None);
         reg
+    }
+
+    /// The type name of a registered state, for panic messages.
+    fn name_of(&self, ty: TypeId) -> &'static str {
+        self.index_of(ty).map_or("?", |idx| self.states[idx].name)
+    }
+
+    /// Adds `node` and its descendants to the live set.
+    fn mark_live(&self, rt: &mut Runtime, node: &Node) {
+        if node.is_vacant() {
+            return;
+        }
+        rt.live.insert(self.states[node.idx].ty, node.id);
+        for child in &node.regions {
+            self.mark_live(rt, child);
+        }
     }
 
     pub(crate) fn index_of(&self, ty: TypeId) -> Option<usize> {
@@ -346,6 +474,28 @@ impl Registry {
         Some(node)
     }
 
+    /// Mutable version of [`find_active`](Self::find_active).
+    pub(crate) fn find_active_mut<'n>(
+        &self,
+        root: &'n mut Node,
+        ty: TypeId,
+    ) -> Option<&'n mut Node> {
+        let path = &self.states[self.index_of(ty)?].path;
+        let (first, rest) = path.split_first()?;
+        if root.idx != *first {
+            return None;
+        }
+        let mut node = root;
+        for &idx in rest {
+            let region = self.states[idx].region_in_parent;
+            if node.regions[region].idx != idx {
+                return None;
+            }
+            node = &mut node.regions[region];
+        }
+        Some(node)
+    }
+
     fn handler(&self, idx: usize, event: TypeId) -> Option<HandlerFn> {
         self.states[idx]
             .triggers
@@ -356,67 +506,121 @@ impl Registry {
 
     /// Enters the root `R` (index 0) with its initial descendants.
     pub(crate) fn enter_root(&self, rt: &mut Runtime, root: Box<dyn ErasedState>) -> Node {
-        self.enter(rt, &mut Nil, 0, Some(root), &[], &mut None)
+        let mut node = self.place(rt, 0, root);
+        self.enter_placed(rt, &mut Nil, &mut node, Towards::nowhere(&mut None));
+        node
     }
 
-    /// Enters `idx`: builds it (unless `instance` is given) from its parent, runs `on_enter`,
-    /// then enters one child per region in declaration order. `towards` is the rest of the path
-    /// to a transition target below `idx` (empty when only initial children are entered); the
-    /// target's instance is taken from `target` when its turn comes.
+    /// A new node for `state` (of registry index `idx`), live from now on, with every region
+    /// vacant.
+    fn place(&self, rt: &mut Runtime, idx: usize, state: Box<dyn ErasedState>) -> Node {
+        let info = &self.states[idx];
+        Node {
+            state,
+            idx,
+            id: rt.activate(info.ty),
+            regions: info.regions.iter().map(|_| Node::vacant()).collect(),
+        }
+    }
+
+    /// Enters `idx` into the vacant `slot`: builds it (unless `instance` is given) from its
+    /// parent, places it in the tree and enters it ([`enter_placed`](Self::enter_placed)).
     fn enter(
         &self,
         rt: &mut Runtime,
         anc: &mut dyn Ancestors,
+        slot: &mut Node,
         idx: usize,
         instance: Option<Box<dyn ErasedState>>,
-        towards: &[usize],
-        target: &mut Option<Box<dyn ErasedState>>,
-    ) -> Node {
-        let info = &self.states[idx];
-        let mut state = match instance {
+        towards: Towards<'_>,
+    ) {
+        let state = match instance {
             Some(state) => state,
             None => {
                 // Checked when the chart was built: every state the library may have to build
                 // (initial children, composites) has a constructor.
-                let ctor = info.ctor.as_ref().expect("checked at construction");
+                let ctor = self.states[idx]
+                    .ctor
+                    .as_ref()
+                    .expect("checked at construction");
                 ctor(anc.parent().expect("only the root has no parent"))
             }
         };
-        let id = rt.activate(info.ty);
+        *slot = self.place(rt, idx, state);
+        self.enter_placed(rt, anc, slot, towards);
+    }
+
+    /// Runs `on_enter` of a node that is already in the tree, then enters one child per region
+    /// in declaration order. Each state is in the tree before its `on_enter` runs, so a panic
+    /// in a hook never leaves an entered state outside the tree.
+    fn enter_placed(
+        &self,
+        rt: &mut Runtime,
+        anc: &mut dyn Ancestors,
+        node: &mut Node,
+        towards: Towards<'_>,
+    ) {
+        let Node {
+            state,
+            regions,
+            idx,
+            id,
+        } = node;
         state.erased_enter(Hook {
             anc: &mut *anc,
             reg: self,
             rt: &mut *rt,
-            id,
+            id: *id,
         });
 
-        let mut regions = Vec::with_capacity(info.regions.len());
+        let info = &self.states[*idx];
         let mut frame = Frame {
-            head: &mut *state,
+            head: &mut **state,
             tail: anc,
         };
-        for (region, &initial) in info.regions.iter().enumerate() {
-            let child = match towards.split_first() {
+        for (region, slot) in regions.iter_mut().enumerate() {
+            match towards.path.split_first() {
                 Some((&next, rest)) if self.states[next].region_in_parent == region => {
-                    let instance = if rest.is_empty() { target.take() } else { None };
-                    self.enter(rt, &mut frame, next, instance, rest, target)
+                    let instance = if rest.is_empty() {
+                        towards.target.take()
+                    } else {
+                        None
+                    };
+                    let towards = Towards {
+                        path: rest,
+                        target: &mut *towards.target,
+                    };
+                    self.enter(rt, &mut frame, slot, next, instance, towards);
                 }
-                _ => self.enter(rt, &mut frame, initial, None, &[], target),
-            };
-            regions.push(child);
-        }
-
-        Node {
-            state,
-            idx,
-            id,
-            regions,
+                _ => {
+                    let initial = info.regions[region];
+                    let towards = Towards::nowhere(&mut *towards.target);
+                    self.enter(rt, &mut frame, slot, initial, None, towards);
+                }
+            }
         }
     }
 
     /// Applies every queued request in order, plus any requested by `on_enter` hooks while
     /// applying them (appended to the end of the queue).
+    ///
+    /// If a hook panics, the panic propagates and the rest of the batch is dropped; the tree
+    /// stays consistent with the live set (see [`ResyncOnUnwind`]).
     pub(crate) fn run_batch(&self, rt: &mut Runtime, root: &mut Node) {
+        if rt.requests.is_empty() {
+            return;
+        }
+        let mut guard = ResyncOnUnwind {
+            reg: self,
+            rt,
+            root,
+            armed: true,
+        };
+        self.apply_all(guard.rt, guard.root);
+        guard.armed = false;
+    }
+
+    fn apply_all(&self, rt: &mut Runtime, root: &mut Node) {
         let mut queue: VecDeque<Request> = std::mem::take(&mut rt.requests).into();
         let mut applied = 0usize;
         while let Some(request) = queue.pop_front() {
@@ -428,7 +632,10 @@ impl Registry {
             assert!(
                 applied <= MAX_TRANSITIONS_PER_BATCH,
                 "more than {MAX_TRANSITIONS_PER_BATCH} transitions in one batch: do `on_enter` \
-                 hooks keep requesting transitions in a cycle?"
+                 hooks keep requesting transitions in a cycle? (the last request: `{}` \
+                 requested `{}`)",
+                self.name_of(request.requester_ty),
+                self.states[request.target_idx].name,
             );
             self.apply(rt, root, request);
             queue.extend(rt.requests.drain(..));
@@ -452,13 +659,32 @@ impl Registry {
             node = child;
         }
 
-        let mut target = Some(request.target);
         if k == 0 {
-            self.exit_node(rt, root, &mut Nil);
-            *root = self.enter(rt, &mut Nil, path[0], target.take(), &[], &mut None);
+            self.restart(rt, root, request.target);
         } else {
+            let mut target = Some(request.target);
             self.replace_in(rt, root, &mut Nil, &path[1..k], &path[k..], &mut target);
         }
+    }
+
+    /// Exits the whole chart and enters `new_root` with its initial descendants.
+    ///
+    /// The root slot is never vacant: the new root takes the old one's place once the old
+    /// root's descendants are exited, just before the old root's own `on_exit`.
+    fn restart(&self, rt: &mut Runtime, root: &mut Node, new_root: Box<dyn ErasedState>) {
+        {
+            let Node { state, regions, .. } = &mut *root;
+            let mut frame = Frame {
+                head: &mut **state,
+                tail: &mut Nil,
+            };
+            for slot in regions.iter_mut() {
+                self.exit_slot(rt, slot, &mut frame);
+            }
+        }
+        let old = std::mem::replace(root, self.place(rt, 0, new_root));
+        self.exit_detached(rt, old, &mut Nil);
+        self.enter_placed(rt, &mut Nil, root, Towards::nowhere(&mut None));
     }
 
     /// Walks down `descend` (active states below `node`), then replaces the active subtree of
@@ -483,27 +709,27 @@ impl Registry {
                 self.replace_in(rt, &mut regions[region], &mut frame, rest, entering, target);
             }
             None => {
-                let region = self.states[entering[0]].region_in_parent;
-                self.exit_node(rt, &mut regions[region], &mut frame);
+                let slot = &mut regions[self.states[entering[0]].region_in_parent];
+                self.exit_slot(rt, slot, &mut frame);
                 let instance = if entering.len() == 1 {
                     target.take()
                 } else {
                     None
                 };
-                regions[region] = self.enter(
-                    rt,
-                    &mut frame,
-                    entering[0],
-                    instance,
-                    &entering[1..],
+                let towards = Towards {
+                    path: &entering[1..],
                     target,
-                );
+                };
+                self.enter(rt, &mut frame, slot, entering[0], instance, towards);
             }
         }
     }
 
     /// Pre-order `update`: parent before children, regions in declaration order.
     pub(crate) fn update_node(&self, rt: &mut Runtime, node: &mut Node, anc: &mut dyn Ancestors) {
+        if node.is_vacant() {
+            return;
+        }
         let Node {
             state, regions, id, ..
         } = node;
@@ -522,21 +748,32 @@ impl Registry {
         }
     }
 
-    /// Post-order `on_exit`: descendants first (regions in declaration order), then `node`.
-    fn exit_node(&self, rt: &mut Runtime, node: &mut Node, anc: &mut dyn Ancestors) {
+    /// Detaches the subtree in `slot` from the tree (leaving the region vacant), then exits it.
+    fn exit_slot(&self, rt: &mut Runtime, slot: &mut Node, anc: &mut dyn Ancestors) {
+        let node = std::mem::replace(slot, Node::vacant());
+        self.exit_detached(rt, node, anc);
+    }
+
+    /// Post-order `on_exit` of a subtree that is no longer in the tree: descendants first
+    /// (regions in declaration order), then `node`. Each state is dropped right after its
+    /// `on_exit`, so everything exited is gone before anything new is entered.
+    fn exit_detached(&self, rt: &mut Runtime, mut node: Node, anc: &mut dyn Ancestors) {
+        if node.is_vacant() {
+            return;
+        }
         let Node {
             state,
             regions,
             idx,
             id,
-        } = node;
+        } = &mut node;
         {
             let mut frame = Frame {
                 head: &mut **state,
                 tail: &mut *anc,
             };
-            for child in regions.iter_mut() {
-                self.exit_node(rt, child, &mut frame);
+            for slot in regions.iter_mut() {
+                self.exit_slot(rt, slot, &mut frame);
             }
         }
         state.erased_exit(Hook {
@@ -557,6 +794,10 @@ impl Registry {
         anc: &mut dyn Ancestors,
         trigger: &mut Dispatch<'_>,
     ) -> bool {
+        // An empty region has no state to handle anything: its branch bubbles up.
+        if node.is_vacant() {
+            return false;
+        }
         let Node {
             state,
             regions,

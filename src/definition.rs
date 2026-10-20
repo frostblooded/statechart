@@ -1,10 +1,11 @@
 //! Declaring a state's regions, children and triggers (the argument of [`State::define`]).
 
-use crate::engine::{Ctor, ErasedState, HandlerFn, RegisterFn, call_handler, register};
+use crate::engine::{Ctor, ErasedState, HandlerFn, ListedAt, RegisterFn, call_handler, register};
 use crate::state::State;
 use crate::trigger::{Event, Trigger};
 use std::any::{TypeId, type_name};
 use std::marker::PhantomData;
+use std::panic::Location;
 
 /// Collects what [`State::define`] declares for the state `S`.
 ///
@@ -43,8 +44,11 @@ pub struct Definition<S> {
 }
 
 pub(crate) struct ChildDef {
+    ty: TypeId,
     pub(crate) register: RegisterFn,
     pub(crate) ctor: Option<Ctor>,
+    /// The user's `region*` / `child*` call that listed the child.
+    pub(crate) listed_at: ListedAt,
 }
 
 /// One region: `children[0]` is the initial child.
@@ -86,6 +90,30 @@ impl<S: State> Definition<S> {
     ///     }
     /// }
     /// ```
+    ///
+    /// `C` must implement `Default`; a child whose data comes from elsewhere is declared with
+    /// [`region_with`](Self::region_with) instead:
+    ///
+    /// ```compile_fail,E0277
+    /// # #![allow(non_camel_case_types)]
+    /// # use statechart::prelude::*;
+    /// #[derive(Debug)] struct Timer;
+    /// #[derive(Debug)] struct Timer_Active { remaining: u32 }
+    /// impl State for Timer_Active { type Parent = Timer; }
+    /// impl State for Timer {
+    ///     type Parent = NoParent;
+    ///     fn define(def: &mut Definition<Self>) {
+    ///         def.region::<Timer_Active>(); // error: `Timer_Active: Default` is not satisfied
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// When the chart is built, if `S` already lists `C` (in this region or another one): each
+    /// state type appears at most once in a chart. The panic points at this call, in debug and
+    /// release builds alike.
+    #[track_caller]
     pub fn region<C>(&mut self) -> Region<'_, S>
     where
         C: State<Parent = S> + Default,
@@ -96,8 +124,17 @@ impl<S: State> Definition<S> {
     /// Declares a region whose initial child is built from the parent by `ctor`, e.g.
     /// `def.region_with(|timer: &Timer| Timer_Active { remaining: timer.duration })`.
     ///
-    /// `ctor` runs each time the child is entered without an instance, right after the
-    /// parent's `on_enter`, so it sees the parent's data as `on_enter` left it.
+    /// `ctor` runs each time the child is entered without an instance, when its region is
+    /// entered: after the parent's `on_enter`, and after every earlier region of the parent has
+    /// been entered (whose `on_enter` hooks may have changed the parent through
+    /// [`parent_mut`](crate::context::Context::parent_mut)). During a transition into an
+    /// already active parent, that is when the transition is applied. Either way `ctor` sees the
+    /// parent's data as it is at that moment.
+    ///
+    /// # Panics
+    ///
+    /// Like [`region`](Self::region), if `S` already lists `C`.
+    #[track_caller]
     pub fn region_with<C>(&mut self, ctor: fn(&S) -> C) -> Region<'_, S>
     where
         C: State<Parent = S>,
@@ -105,12 +142,7 @@ impl<S: State> Definition<S> {
         self.regions.push(RegionDef {
             children: Vec::new(),
         });
-        let region = self.regions.last_mut().expect("just pushed");
-        Region {
-            def: region,
-            _state: PhantomData,
-        }
-        .push::<C>(Some(erase_ctor(ctor)))
+        Region { def: self }.push::<C>(Some(erase_ctor(ctor)))
     }
 
     /// Declares that `S` handles the trigger `E`, with its `impl Trigger<E>`. Returns `self`,
@@ -160,16 +192,60 @@ impl<S: State> Definition<S> {
 
 /// Builder for one region of `S`, returned by [`Definition::region`] and
 /// [`Definition::region_with`]. Adds the region's other (non-initial) children.
+///
+/// Every child must name `S` as its parent:
+///
+/// ```compile_fail,E0271
+/// # #![allow(non_camel_case_types)]
+/// # use statechart::prelude::*;
+/// #[derive(Debug)] struct Timer;
+/// #[derive(Debug, Default)] struct Timer_Idle;
+/// # #[derive(Debug)] struct Door;
+/// # impl State for Door { type Parent = NoParent; }
+/// #[derive(Debug, Default)] struct Door_Open;
+/// impl State for Timer_Idle { type Parent = Timer; }
+/// impl State for Door_Open { type Parent = Door; }
+/// impl State for Timer {
+///     type Parent = NoParent;
+///     fn define(def: &mut Definition<Self>) {
+///         let region = def.region::<Timer_Idle>();
+///         region.child::<Door_Open>(); // error: `Door_Open::Parent` is `Door`, not `Timer`
+///     }
+/// }
+/// ```
+///
+/// # Panics
+///
+/// Each method panics when the chart is built if `S` already lists the child (in this region
+/// or another one), pointing at the call, in debug and release builds alike.
 pub struct Region<'d, S> {
-    def: &'d mut RegionDef,
-    _state: PhantomData<fn() -> S>,
+    /// The region being declared is the last one.
+    def: &'d mut Definition<S>,
 }
 
 impl<S: State> Region<'_, S> {
+    #[track_caller]
     fn push<C: State<Parent = S>>(self, ctor: Option<Ctor>) -> Self {
-        self.def.children.push(ChildDef {
+        let ty = TypeId::of::<C>();
+        // Spec item 11, always on (user decision D1). `C::Parent == S`, so `S` is the only state
+        // that can list `C`: a duplicate is always caught here, at the user's line.
+        assert!(
+            self.def
+                .regions
+                .iter()
+                .flat_map(|region| &region.children)
+                .all(|child| child.ty != ty),
+            "State type `{}` appears more than once in the statechart hierarchy: `{}` lists it \
+             twice in `define`",
+            type_name::<C>(),
+            type_name::<S>()
+        );
+        let region = self.def.regions.last_mut().expect("a region is open");
+        region.children.push(ChildDef {
+            ty,
             register: register::<C>,
             ctor,
+            listed_at: Location::caller(),
         });
         self
     }
@@ -177,6 +253,7 @@ impl<S: State> Region<'_, S> {
     /// Adds the child `C` to this region. When the library has to build `C` itself (because
     /// a transition targets one of `C`'s descendants while `C` is inactive) it uses
     /// `C::default()`.
+    #[track_caller]
     pub fn child<C>(self) -> Self
     where
         C: State<Parent = S> + Default,
@@ -184,7 +261,9 @@ impl<S: State> Region<'_, S> {
         self.child_with(|_: &S| C::default())
     }
 
-    /// Adds the child `C`, built from the parent by `ctor` when the library has to build it.
+    /// Adds the child `C`, built from the parent by `ctor` when the library has to build it
+    /// (at that moment, so `ctor` sees the parent's current data).
+    #[track_caller]
     pub fn child_with<C>(self, ctor: fn(&S) -> C) -> Self
     where
         C: State<Parent = S>,
@@ -199,7 +278,9 @@ impl<S: State> Region<'_, S> {
     /// # Panics
     ///
     /// When the chart is built, if `C` has regions: a composite state can be entered on the way
-    /// to one of its descendants, so the library must be able to build it.
+    /// to one of its descendants, so the library must be able to build it. The message names
+    /// the line of this call.
+    #[track_caller]
     pub fn child_explicit<C>(self) -> Self
     where
         C: State<Parent = S>,

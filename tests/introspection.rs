@@ -161,3 +161,27 @@ fn active_type_ids_with_parallel_regions_are_post_order() {
         ]
     );
 }
+
+#[test]
+fn state_finds_active_states_in_every_region() {
+    use robot::*;
+    let chart = Statechart::new(Robot);
+    assert!(chart.state::<Robot_Body>().is_some());
+    assert!(chart.state::<Robot_Body_Legs_Still>().is_some());
+    // Region 1 of Robot_Body.
+    assert!(chart.state::<Robot_Body_Arms>().is_some());
+}
+
+#[test]
+fn state_mut_changes_the_data_of_an_active_state() {
+    use chain::*;
+    let mut chart = Statechart::new(A);
+    chart.state_mut::<A_B>().unwrap().n = 5;
+    assert_eq!(chart.state::<A_B>().unwrap().n, 5);
+    assert_eq!(chart.get_debug_name(), "A -> A_B { n: 5 } -> A_B_C");
+    assert!(chart.state_mut::<A_X>().is_none());
+    assert!(chart.state_mut::<A>().is_some());
+
+    let mut robot = Statechart::new(robot::Robot);
+    assert!(robot.state_mut::<robot::Robot_Body_Arms>().is_some());
+}

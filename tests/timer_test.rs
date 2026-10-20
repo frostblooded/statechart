@@ -123,3 +123,19 @@ fn test_reset_restarts_the_countdown_from_any_state() {
         Duration::from_millis(10)
     );
 }
+
+#[test]
+fn test_timer_active_prints_the_remaining_time_in_seconds_to_a_tenth() {
+    let active = |millis| {
+        format!(
+            "{:?}",
+            Timer_Active {
+                remaining: Duration::from_millis(millis),
+            }
+        )
+    };
+    assert_eq!(active(60_000), "Timer_Active { remaining: 60.0s }");
+    // Below one second too (not "999.0ms").
+    assert_eq!(active(999), "Timer_Active { remaining: 1.0s }");
+    assert_eq!(active(400), "Timer_Active { remaining: 0.4s }");
+}

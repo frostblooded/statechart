@@ -12,7 +12,7 @@
 
 use crate::context::{Context, ExitContext};
 use crate::definition::Definition;
-use std::any::Any;
+use std::any::{Any, TypeId, type_name};
 use std::fmt::Debug;
 
 /// A state of a statechart. The struct's fields are the state's data.
@@ -41,7 +41,7 @@ use std::fmt::Debug;
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a statechart state",
     label = "`{Self}` does not implement `State`",
-    note = "states implement `statechart::state::State`; `NoParent` never does: a root state has no parent, so its context has no `parent()` or `parent_mut()`"
+    note = "a state is a type that derives `Debug` and implements `statechart::state::State` (`impl State for {Self} {{ type Parent = ...; }}`)"
 )]
 pub trait State: Any + Debug + Sized {
     /// The state this one is a child of, or [`NoParent`] for the root.
@@ -76,7 +76,17 @@ pub trait State: Any + Debug + Sized {
     /// Runs when the state stops being active, after all of its descendants' `on_exit`.
     ///
     /// Takes an [`ExitContext`], which has ancestor access but no `transition`: a state that
-    /// is being exited cannot request transitions (they would always be dropped).
+    /// is being exited cannot request transitions (they would always be dropped). Writing it
+    /// with a [`Context`] does not compile:
+    ///
+    /// ```compile_fail,E0053
+    /// # use statechart::prelude::*;
+    /// #[derive(Debug)] struct Timer;
+    /// impl State for Timer {
+    ///     type Parent = NoParent;
+    ///     fn on_exit(&mut self, ctx: &mut Context<Self>) {} // error: expected `ExitContext`
+    /// }
+    /// ```
     fn on_exit(&mut self, ctx: &mut ExitContext<'_, Self>) {
         let _ = ctx;
     }
@@ -93,10 +103,21 @@ pub trait State: Any + Debug + Sized {
 #[derive(Debug)]
 pub enum NoParent {}
 
-mod sealed {
+pub(crate) mod sealed {
     pub trait Sealed {}
     impl Sealed for super::NoParent {}
     impl<P: super::State> Sealed for P {}
+
+    /// A parent with data, that is, any state: the bound of `parent()` / `parent_mut()`. Its
+    /// own trait (instead of `State`) so that the root's missing `parent()` gets its own
+    /// message.
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` is not a statechart state",
+        label = "the root state has no parent",
+        note = "a root state has no parent, so its context has no `parent()` or `parent_mut()`"
+    )]
+    pub trait ParentState: super::State {}
+    impl<P: super::State> ParentState for P {}
 
     /// Type equality as a trait bound, so that a mismatch is reported with a readable message.
     #[diagnostic::on_unimplemented(
@@ -109,18 +130,46 @@ mod sealed {
 }
 
 /// What may appear as [`State::Parent`]: another [`State`] or [`NoParent`]. Sealed.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a parent",
+    label = "`{Self}` is neither a statechart state nor `NoParent`",
+    note = "`type Parent` names another state of the same chart, or `NoParent` for the root"
+)]
 pub trait ParentSlot: sealed::Sealed + 'static {
     /// The root of the chart that a state with this parent belongs to.
     #[doc(hidden)]
     type RootOf<Child: State>: State;
+
+    /// For a panic message: if `Self` is a state that is not registered, the highest
+    /// unregistered state on the way up from `Self` and its (registered) parent.
+    #[doc(hidden)]
+    fn unlisted_link(
+        is_registered: &dyn Fn(TypeId) -> bool,
+    ) -> Option<(&'static str, &'static str)>;
 }
 
 impl ParentSlot for NoParent {
     type RootOf<Child: State> = Child;
+
+    fn unlisted_link(_: &dyn Fn(TypeId) -> bool) -> Option<(&'static str, &'static str)> {
+        None
+    }
 }
 
 impl<P: State> ParentSlot for P {
     type RootOf<Child: State> = <P::Parent as ParentSlot>::RootOf<P>;
+
+    fn unlisted_link(
+        is_registered: &dyn Fn(TypeId) -> bool,
+    ) -> Option<(&'static str, &'static str)> {
+        if is_registered(TypeId::of::<P>()) {
+            return None;
+        }
+        Some(
+            P::Parent::unlisted_link(is_registered)
+                .unwrap_or((type_name::<P>(), type_name::<P::Parent>())),
+        )
+    }
 }
 
 /// The root state type of the chart `S` belongs to, computed from the `Parent` chain.

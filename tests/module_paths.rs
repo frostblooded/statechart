@@ -95,3 +95,51 @@ fn the_prelude_re_exports_the_same_items_as_the_module_paths() {
         TypeId::of::<statechart::trigger::NotHandled>()
     );
 }
+
+/// Glob-imports the crate root next to local items with every public item name. If the crate
+/// root re-exported one of those names, using it here would be ambiguous (E0659) and this file
+/// would not compile.
+#[allow(dead_code)]
+mod crate_root_exports_only_modules {
+    use self::dummies::*;
+    #[allow(unused_imports)]
+    use ::statechart::*;
+
+    mod dummies {
+        pub struct State;
+        pub struct NoParent;
+        pub struct ParentSlot;
+        pub struct InChart;
+        pub struct RootOf;
+        pub struct Definition;
+        pub struct Region;
+        pub struct Context;
+        pub struct ExitContext;
+        pub struct Event;
+        pub struct Trigger;
+        pub struct NotHandled;
+        pub struct Statechart;
+    }
+
+    // Type position: a re-export of a trait, a type alias or a non-unit struct is caught too.
+    pub type Names = (
+        State,
+        NoParent,
+        ParentSlot,
+        InChart,
+        RootOf,
+        Definition,
+        Region,
+        Context,
+        ExitContext,
+        Event,
+        Trigger,
+        NotHandled,
+        Statechart,
+    );
+}
+
+#[test]
+fn the_crate_root_re_exports_only_the_modules() {
+    let _: Option<crate_root_exports_only_modules::Names> = None;
+}

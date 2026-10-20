@@ -2,7 +2,7 @@
 //! (except in `on_exit`) transitions.
 
 use crate::engine::{Ancestors, ErasedState, Registry, Request, Runtime};
-use crate::state::{InChart, RootOf, State};
+use crate::state::{InChart, ParentSlot, RootOf, State, sealed::ParentState};
 use std::any::{TypeId, type_name};
 use std::marker::PhantomData;
 
@@ -108,7 +108,7 @@ macro_rules! ancestor_access {
         /// The direct parent's data. Statically typed; the root does not have this method.
         pub fn parent(&self) -> &S::Parent
         where
-            S::Parent: State,
+            S::Parent: ParentState,
         {
             self.hook
                 .anc
@@ -121,7 +121,7 @@ macro_rules! ancestor_access {
         /// method.
         pub fn parent_mut(&mut self) -> &mut S::Parent
         where
-            S::Parent: State,
+            S::Parent: ParentState,
         {
             self.hook
                 .anc
@@ -154,6 +154,24 @@ macro_rules! ancestor_access {
         ///
         /// During a transition, states count as active from just before their `on_enter` until
         /// just after their `on_exit`.
+        ///
+        /// `T` must belong to the same chart:
+        ///
+        /// ```compile_fail,E0277
+        /// # #![allow(non_camel_case_types)]
+        /// # use statechart::prelude::*;
+        /// #[derive(Debug)] struct Timer;
+        /// #[derive(Debug)] struct Door;
+        /// #[derive(Debug, Default)] struct Door_Open;
+        /// impl State for Door { type Parent = NoParent; fn define(d: &mut Definition<Self>) { d.region::<Door_Open>(); } }
+        /// impl State for Door_Open { type Parent = Door; }
+        /// impl State for Timer {
+        ///     type Parent = NoParent;
+        ///     fn update(&mut self, ctx: &mut Context<Self>) {
+        ///         ctx.is_active::<Door_Open>(); // error: `Door_Open` belongs to the `Door` chart
+        ///     }
+        /// }
+        /// ```
         pub fn is_active<T: InChart<RootOf<S>>>(&self) -> bool {
             self.hook.rt.is_live(TypeId::of::<T>())
         }
@@ -172,11 +190,14 @@ impl<'a, S: State> Context<'a, S> {
     /// the state that made it has been exited by then. Targeting the active state of the same
     /// type is an external self-transition (exit, then enter `target`).
     ///
-    /// The transition exits and re-enters as little as possible. The deepest active state on
-    /// the target's path from the root (the least common ancestor) stays, and only its region
-    /// that leads to `target` is exited and entered again. Its other regions and everything
-    /// above it are untouched, so a transition into one region of a parallel state leaves the
-    /// sibling regions as they are. To reset every region, target the parallel state itself.
+    /// The transition exits and re-enters as little as possible. Its least common ancestor
+    /// (LCA) is the deepest active state on the path from the root to `target`, `target` itself
+    /// excluded (so the LCA is always a strict ancestor of `target`). The LCA stays, and only
+    /// its region that leads to `target` is exited and entered again. Its other regions and
+    /// everything above it are untouched, so a transition into one region of a parallel state
+    /// leaves the sibling regions as they are. To reset every region, target the parallel
+    /// state itself: its parent is then the LCA, and the parallel state is exited and entered
+    /// again with all of its regions.
     ///
     /// Only states of the same chart are accepted:
     ///
@@ -196,20 +217,40 @@ impl<'a, S: State> Context<'a, S> {
     /// }
     /// ```
     ///
+    /// The root of another chart is rejected too:
+    ///
+    /// ```compile_fail,E0277
+    /// # use statechart::prelude::*;
+    /// #[derive(Debug)] struct Timer;
+    /// #[derive(Debug)] struct Door;
+    /// impl State for Door { type Parent = NoParent; }
+    /// impl State for Timer {
+    ///     type Parent = NoParent;
+    ///     fn update(&mut self, ctx: &mut Context<Self>) {
+    ///         ctx.transition(Door); // error: `Door` is not a state of the statechart rooted at `Timer`
+    ///     }
+    /// }
+    /// ```
+    ///
     /// # Panics
     ///
-    /// If `T`'s parent does not list `T` in its [`define`](State::define) (the compiler checks
-    /// `type Parent`, but cannot check that the parent lists the child). The panic happens here,
-    /// in the hook that made the request, before anything changes.
+    /// If `T` is not reachable through the `define` functions (the compiler checks
+    /// `type Parent`, but cannot check that the parent lists the child):
+    ///
+    /// * when `T`'s parent does not list `T`, with the message ``Transition target `T` is not
+    ///   part of this statechart: its parent `P` does not list it in `define` ``;
+    /// * when `T`'s parent does list it, but an ancestor `A` of `T` is not listed by its own
+    ///   parent `Q`: ``... its ancestor `A` is not listed by its parent `Q` in `define` ``.
+    ///
+    /// The panic happens here, in the hook that made the request (the reported location is the
+    /// caller's line). A request made in `update` or in a trigger handler panics before anything
+    /// changes. A request made in `on_enter` while a transition is applied panics in the middle
+    /// of that transition, like any panic in a hook at that point (see
+    /// [Panics in hooks](crate::statechart::Statechart#panics-in-hooks)).
     #[track_caller]
     pub fn transition<T: InChart<RootOf<S>>>(&mut self, target: T) {
         let Some(target_idx) = self.hook.reg.index_of(TypeId::of::<T>()) else {
-            panic!(
-                "Transition target `{}` is not part of this statechart: its parent `{}` does not \
-                 list it in `define`",
-                type_name::<T>(),
-                type_name::<T::Parent>()
-            );
+            unlisted_target::<T>(self.hook.reg)
         };
         self.hook.rt.requests.push(Request {
             requester_ty: TypeId::of::<S>(),
@@ -222,4 +263,24 @@ impl<'a, S: State> Context<'a, S> {
 
 impl<'a, S: State> ExitContext<'a, S> {
     ancestor_access!();
+}
+
+/// Panics for a transition target that the registry does not know, naming the missing link.
+#[cold]
+#[track_caller]
+fn unlisted_target<T: State>(reg: &Registry) -> ! {
+    let is_registered = |ty: TypeId| reg.index_of(ty).is_some();
+    match <T::Parent as ParentSlot>::unlisted_link(&is_registered) {
+        None => panic!(
+            "Transition target `{}` is not part of this statechart: its parent `{}` does not list \
+             it in `define`",
+            type_name::<T>(),
+            type_name::<T::Parent>()
+        ),
+        Some((ancestor, parent)) => panic!(
+            "Transition target `{}` is not part of this statechart: its ancestor `{ancestor}` is \
+             not listed by its parent `{parent}` in `define`",
+            type_name::<T>()
+        ),
+    }
 }

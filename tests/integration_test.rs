@@ -58,7 +58,8 @@ mod test_1 {
 /// The structural mistakes the compiler cannot see still panic, with these exact messages.
 ///
 /// The duplicate-state check is an `assert!`, so it fires in debug *and* release builds
-/// (user decision D1): these tests are deliberately not gated on `cfg(debug_assertions)`.
+/// (user decision D1): these tests are deliberately not gated on `cfg(debug_assertions)`, and
+/// CI runs them in a release build too.
 mod test_2 {
     pub mod duplicate {
         use statechart::prelude::*;
