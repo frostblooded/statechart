@@ -350,8 +350,9 @@ impl State for Vacant {
 }
 
 impl Drop for Node {
-    /// Drops the descendants first, deepest first and regions in declaration order (the order
-    /// `on_exit` runs in), then the state itself.
+    /// Drops the descendants first, in post-order (each region's whole subtree, children before
+    /// their parent, regions in declaration order: the order `on_exit` runs in), then the state
+    /// itself.
     fn drop(&mut self) {
         self.regions.clear();
     }
@@ -424,6 +425,10 @@ impl<'t> Towards<'t> {
 /// not entered yet, and [`Runtime::root_pending_enter`] says so. A state whose exit was
 /// interrupted, or a detached descendant that was never exited, may still be in the live set.
 /// Rebuilding the live set from the tree runs no user code, so it is safe during unwinding.
+///
+/// It also drops the requests that `on_enter` hooks made but the batch never queued (the
+/// queued ones go with the batch's own queue), so their targets, and whatever resources they
+/// hold, are released while the panic unwinds instead of at the next operation.
 struct ResyncOnUnwind<'a> {
     reg: &'a Registry,
     rt: &'a mut Runtime,
@@ -436,6 +441,23 @@ impl Drop for ResyncOnUnwind<'_> {
         if self.armed {
             self.rt.live.clear();
             self.reg.mark_live(self.rt, self.root);
+            self.rt.requests.clear();
+        }
+    }
+}
+
+/// Drops the requests recorded by a traversal (`update` or a trigger dispatch) if a hook panics
+/// during it. They would never be applied anyway (every operation first discards leftovers),
+/// but their targets may hold resources, which are released while the panic unwinds.
+struct DiscardRequestsOnUnwind<'a> {
+    rt: &'a mut Runtime,
+    armed: bool,
+}
+
+impl Drop for DiscardRequestsOnUnwind<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.rt.requests.clear();
         }
     }
 }
@@ -772,8 +794,32 @@ impl Registry {
         }
     }
 
+    /// Runs `update` on every active state and records the requested transitions (applied
+    /// later by [`run_batch`](Self::run_batch)). A panic drops the requests made so far.
+    pub(crate) fn update_root(&self, rt: &mut Runtime, root: &mut Node) {
+        rt.requests.clear();
+        let mut guard = DiscardRequestsOnUnwind { rt, armed: true };
+        self.update_node(guard.rt, root, &mut Nil);
+        guard.armed = false;
+    }
+
+    /// Runs every eligible handler of a trigger and records the requested transitions
+    /// (applied later by [`run_batch`](Self::run_batch)). A panic drops the requests made so
+    /// far.
+    pub(crate) fn dispatch_root(
+        &self,
+        rt: &mut Runtime,
+        root: &mut Node,
+        trigger: &mut Dispatch<'_>,
+    ) {
+        rt.requests.clear();
+        let mut guard = DiscardRequestsOnUnwind { rt, armed: true };
+        self.dispatch(guard.rt, root, &mut Nil, trigger);
+        guard.armed = false;
+    }
+
     /// Pre-order `update`: parent before children, regions in declaration order.
-    pub(crate) fn update_node(&self, rt: &mut Runtime, node: &mut Node, anc: &mut dyn Ancestors) {
+    fn update_node(&self, rt: &mut Runtime, node: &mut Node, anc: &mut dyn Ancestors) {
         if node.is_vacant() {
             return;
         }
@@ -834,7 +880,7 @@ impl Registry {
 
     /// Dispatches a trigger below (and including) `node`. Returns `true` when every active
     /// branch through `node` was handled at or below it.
-    pub(crate) fn dispatch(
+    fn dispatch(
         &self,
         rt: &mut Runtime,
         node: &mut Node,

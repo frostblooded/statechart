@@ -174,7 +174,7 @@ pub(crate) mod sealed {
     #[diagnostic::on_unimplemented(
         message = "this state belongs to the statechart rooted at `{Self}`, not the one rooted at `{R}`",
         label = "belongs to the statechart rooted at `{Self}`",
-        note = "following `type Parent` up from a state must end at the root of the chart it is used with"
+        note = "following `type Parent` up from a state must end at the root of the chart it is used with; in generic code, bound the state type `T` with `T: statechart::state::InChart<statechart::state::RootOf<S>>` in a hook of state `S`, or with `T: statechart::state::InChart<R>` for a `Statechart<R>`"
     )]
     pub trait SameRoot<R> {}
     impl<R> SameRoot<R> for R {}
@@ -208,9 +208,21 @@ pub type RootOf<S> = <<S as State>::Parent as ParentSlot>::RootOf<S>;
 /// Used to reject, at compile time, transitions to states of another chart and queries such as
 /// [`Statechart::is_active`](crate::statechart::Statechart::is_active) for foreign states.
 ///
-/// A state of another chart is reported as such ("this state belongs to the statechart rooted
-/// at ..."). Anything else, such as a boxed state (`ctx.transition(Box::new(..))`) or a type
-/// that is not a state at all, gets this trait's own message:
+/// A state below the root of another chart is reported as such ("this state belongs to the
+/// statechart rooted at `Door`, not the one rooted at `Timer`"). Everything else gets this
+/// trait's own message ("`X` is not a state of the statechart rooted at `Timer`"): the root of
+/// another chart, a boxed state (`ctx.transition(Box::new(..))`) or a reference, and a type
+/// that is not a state at all.
+///
+/// ```compile_fail,E0277
+/// # use statechart::prelude::*;
+/// #[derive(Debug)] struct Timer;
+/// impl State for Timer { type Parent = NoParent; }
+/// #[derive(Debug)] struct Door;
+/// impl State for Door { type Parent = NoParent; }
+/// let chart = Statechart::new(Timer);
+/// let _ = chart.is_active::<Door>(); // error: `Door` is not a state of the statechart rooted at `Timer`
+/// ```
 ///
 /// ```compile_fail,E0277
 /// # #![allow(non_camel_case_types)]
@@ -228,10 +240,64 @@ pub type RootOf<S> = <<S as State>::Parent as ParentSlot>::RootOf<S>;
 ///     }
 /// }
 /// ```
+///
+/// # Generic code
+///
+/// [`Context::transition`] and [`Context::is_active`] take `T: InChart<RootOf<S>>`, and the
+/// queries of [`Statechart<R>`](crate::statechart::Statechart) take `T: InChart<R>`. A generic
+/// helper repeats that bound, with both names imported from this module. (The compiler may
+/// suggest a bound on an internal trait instead; that one cannot be named outside the crate.)
+///
+/// ```
+/// # #![allow(non_camel_case_types)]
+/// use statechart::prelude::*;
+/// use statechart::state::{InChart, RootOf};
+///
+/// /// Requests `target` from a hook of any state `S`.
+/// fn go<S: State, T: InChart<RootOf<S>>>(ctx: &mut Context<S>, target: T) {
+///     ctx.transition(target);
+/// }
+///
+/// /// Whether `T` is active, for a chart with any root `R`.
+/// fn active<R: State<Parent = NoParent>, T: InChart<R>>(chart: &Statechart<R>) -> bool {
+///     chart.is_active::<T>()
+/// }
+///
+/// #[derive(Debug)]
+/// struct Door;
+/// impl State for Door {
+///     type Parent = NoParent;
+///     fn define(def: &mut Definition<Self>) {
+///         def.region::<Door_Closed>().child::<Door_Open>();
+///     }
+/// }
+///
+/// #[derive(Debug, Default)]
+/// struct Door_Closed;
+/// impl State for Door_Closed {
+///     type Parent = Door;
+///     fn update(&mut self, ctx: &mut Context<Self>) {
+///         go(ctx, Door_Open);
+///     }
+/// }
+///
+/// #[derive(Debug, Default)]
+/// struct Door_Open;
+/// impl State for Door_Open {
+///     type Parent = Door;
+/// }
+///
+/// let mut chart = Statechart::new(Door);
+/// chart.update();
+/// assert!(active::<Door, Door_Open>(&chart));
+/// ```
+///
+/// [`Context::transition`]: crate::context::Context::transition
+/// [`Context::is_active`]: crate::context::Context::is_active
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a state of the statechart rooted at `{R}`",
     label = "not a state type of this chart",
-    note = "the chart only accepts its own state types: types that implement `State` and whose `type Parent` chain ends at `{R}`; pass a state by value (`ctx.transition(Target {{ .. }})`), not boxed or by reference"
+    note = "the chart only accepts its own state types: types that implement `State` and whose `type Parent` chain ends at `{R}`; if you passed a `Box` or a reference to a state, pass the state itself by value (`ctx.transition(Target {{ .. }})`)"
 )]
 pub trait InChart<R>: State {}
 

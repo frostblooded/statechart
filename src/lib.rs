@@ -209,10 +209,11 @@
 //!   `region_with` / `child_with` sees the parent's data as it is at that moment, including
 //!   changes made by the `on_enter` hooks of earlier regions (through `parent_mut`) and, for a
 //!   transition into an already active parent, everything done since that parent was entered.
-//! * `on_exit` runs deepest first: a state's descendants exit (regions in declaration order)
+//! * `on_exit` runs in post-order: a state's descendants exit (regions in declaration order)
 //!   before the state itself. Each state is dropped right after its own `on_exit`, before
-//!   anything new is entered. Dropping the chart drops the active states (deepest first)
-//!   without running `on_exit`.
+//!   anything new is entered. Dropping the chart drops the active states in the same
+//!   post-order (children before their parent, regions in declaration order) without running
+//!   `on_exit`.
 //! * `update` runs parent before children, regions in declaration order.
 //! * A panic in a hook propagates to the caller and leaves the chart consistent and usable; see
 //!   [Panics in hooks](statechart::Statechart#panics-in-hooks).
@@ -224,7 +225,8 @@
 //! 1. finds the least common ancestor (LCA): the deepest active state on the path from the root
 //!    to the target, the target itself excluded (so the LCA is always a strict ancestor of the
 //!    target);
-//! 2. exits the active subtree of the LCA's region that leads to the target (deepest first);
+//! 2. exits the active subtree of the LCA's region that leads to the target (post-order:
+//!    descendants before their parent);
 //! 3. enters every state from there down to the target, parent first. Inactive ancestors of the
 //!    target are built with the constructor their parent registered, the target is the instance
 //!    passed to `transition`, and every region not on the path gets its initial child.
@@ -245,8 +247,9 @@
 //! * requests made by `on_enter` hooks while a request is applied go to the end of the batch;
 //! * a request is dropped if the state instance that made it has been exited by an earlier
 //!   transition in the same batch;
-//! * more than 10 000 transitions in one batch panic, which catches `on_enter` hooks that keep
-//!   requesting transitions in a cycle (the message names the last request).
+//! * more than 10 000 applied transitions in one batch panic, which catches `on_enter` hooks
+//!   that keep requesting transitions in a cycle (the message names the last request). Dropped
+//!   requests do not count.
 //!
 //! # Introspection
 //!
@@ -257,7 +260,9 @@
 //!   [`state::<T>()`](statechart::Statechart::state) and
 //!   [`state_mut::<T>()`](statechart::Statechart::state_mut) query one state type.
 //! * [`get_recursive_active_type_ids`](statechart::Statechart::get_recursive_active_type_ids)
-//!   lists the active states below the root, deepest first.
+//!   lists the active states below the root in post-order: deepest first within each branch,
+//!   branches in region declaration order (the order `on_exit` runs in). So for
+//!   `R -> [R_A, R_B -> R_B_1]` it is `[R_A, R_B_1, R_B]`, not sorted by depth.
 //!
 //! # Checks
 //!
@@ -279,10 +284,11 @@
 //!
 //! # Limitations
 //!
-//! A [`Statechart`](statechart::Statechart) is neither `Send` nor `Sync`, hooks cannot fire
-//! triggers (there are no internal events), and states, triggers and trigger outputs are
-//! `'static` (they cannot borrow; pass data in as owned trigger fields or through the root's
-//! data). See [Limitations](statechart::Statechart#limitations).
+//! A [`Statechart`](statechart::Statechart) is neither `Send` nor `Sync` (nor `UnwindSafe`),
+//! hooks cannot fire triggers (there are no internal events), a hook can borrow only one
+//! ancestor mutably at a time, and states, triggers and trigger outputs are `'static` (they
+//! cannot hold non-`'static` borrows; pass data in as owned trigger fields or through the
+//! root's data). See [Limitations](statechart::Statechart#limitations).
 //!
 //! # Imports
 //!

@@ -1,6 +1,6 @@
 //! The [`Statechart`]: owns the active configuration and runs updates, triggers and transitions.
 
-use crate::engine::{Dispatch, Nil, Node, Registry, Runtime, Sink};
+use crate::engine::{Dispatch, Node, Registry, Runtime, Sink};
 use crate::state::{InChart, NoParent, State};
 use crate::trigger::{Event, NotHandled};
 use std::any::TypeId;
@@ -66,11 +66,17 @@ use std::marker::PhantomData;
 ///
 /// # When states are dropped
 ///
-/// A state's struct is dropped right after its `on_exit`, deepest first, before any state of
-/// the same transition is entered. So a state that holds a resource (a socket, a file lock, an
-/// audio handle) releases it before the state that replaces it, or the new instance of an
-/// external self-transition, runs its `on_enter`. Dropping the `Statechart` drops every active
-/// state, deepest first, **without** running `on_exit`.
+/// A state's struct is dropped right after its `on_exit`, before any state of the same
+/// transition is entered. `on_exit` (and so dropping) runs in post-order: a state's descendants
+/// before the state itself, deepest first within each branch, branches in region declaration
+/// order (the order of [`get_recursive_active_type_ids`](Self::get_recursive_active_type_ids)).
+/// So a state that holds a resource (a socket, a file lock, an audio handle) releases it before
+/// the state that replaces it, or the new instance of an external self-transition, runs its
+/// `on_enter`. Dropping the `Statechart` drops every active state in the same post-order
+/// (children before their parent, the root last), **without** running `on_exit`.
+///
+/// A requested target that is never entered (its request was dropped, or discarded by a panic)
+/// is dropped as soon as that is decided; see [Panics in hooks](#panics-in-hooks).
 ///
 /// # Panics in hooks
 ///
@@ -80,9 +86,12 @@ use std::marker::PhantomData;
 /// usable:
 ///
 /// * a panic in `update` or in a trigger handler changes nothing: the transitions requested so
-///   far are discarded;
+///   far are discarded, and their targets are dropped while the panic unwinds (before
+///   `catch_unwind` returns);
 /// * a panic while a transition is applied stops that transition (and the rest of the batch)
-///   where it was. States already exited stay exited, and the rest of the subtree that was
+///   where it was. The requests still waiting in the batch, including those made by `on_enter`
+///   hooks, are discarded the same way: never applied later, and dropped while the panic
+///   unwinds. States already exited stay exited, and the rest of the subtree that was
 ///   being exited is dropped without `on_exit`. A state whose `on_enter` panicked counts as
 ///   entered; states not entered yet are not entered. A region left without a new state is
 ///   **empty**: it has no active state (printed as `(empty)`), updates skip it, a trigger
@@ -103,15 +112,74 @@ use std::marker::PhantomData;
 /// agree, no state's `on_exit` runs twice, and requests made by the remaining states are
 /// applied as usual.
 ///
+/// `Statechart` is not [`UnwindSafe`](std::panic::UnwindSafe) or
+/// [`RefUnwindSafe`](std::panic::RefUnwindSafe) (it stores type-erased states, and a `&mut`
+/// is never `UnwindSafe` anyway), so wrap the closure given to
+/// [`catch_unwind`](std::panic::catch_unwind) in [`AssertUnwindSafe`](std::panic::AssertUnwindSafe).
+/// That is sound here, because the chart is consistent after a panic, as described above:
+///
+/// ```
+/// # #![allow(non_camel_case_types)]
+/// # use statechart::prelude::*;
+/// use std::panic::{AssertUnwindSafe, catch_unwind};
+///
+/// #[derive(Debug)]
+/// struct Door {
+///     jammed: bool,
+/// }
+/// impl State for Door {
+///     type Parent = NoParent;
+///     fn define(def: &mut Definition<Self>) {
+///         def.region::<Door_Closed>().child::<Door_Open>();
+///     }
+/// }
+///
+/// #[derive(Debug, Default)]
+/// struct Door_Closed;
+/// impl State for Door_Closed {
+///     type Parent = Door;
+///     fn update(&mut self, ctx: &mut Context<Self>) {
+///         ctx.transition(Door_Open);
+///         if ctx.parent().jammed {
+///             panic!("the door is jammed");
+///         }
+///     }
+/// }
+///
+/// #[derive(Debug, Default)]
+/// struct Door_Open;
+/// impl State for Door_Open {
+///     type Parent = Door;
+/// }
+///
+/// let mut chart = Statechart::new(Door { jammed: true });
+/// let result = catch_unwind(AssertUnwindSafe(|| chart.update()));
+/// assert!(result.is_err());
+/// assert!(chart.is_active::<Door_Closed>()); // the request was discarded
+///
+/// chart.root_mut().jammed = false;
+/// chart.update(); // still usable
+/// assert!(chart.is_active::<Door_Open>());
+/// ```
+///
 /// # Limitations
 ///
 /// * `Statechart` is neither `Send` nor `Sync`, whatever the states are: it stores states as
 ///   `Box<dyn ...>` without a `Send` bound. Keep a chart on the thread that created it.
+/// * It is not `UnwindSafe` / `RefUnwindSafe` either: catch panics with
+///   `catch_unwind(AssertUnwindSafe(|| chart.update()))` (see
+///   [Panics in hooks](#panics-in-hooks)).
 /// * Hooks cannot fire triggers (there are no internal events); they request transitions.
+/// * In a hook, only one ancestor can be borrowed mutably at a time. While a reference from
+///   `ctx.parent_mut()` or `ctx.ancestor_mut()` is alive, the context cannot be used for
+///   anything else (another ancestor, `is_active`, `transition`), so read what you need into
+///   locals first: `let level = ctx.ancestor::<Game>().unwrap().level;
+///   ctx.parent_mut().level = level;` (see
+///   [`Context`](crate::context::Context#one-mutable-borrow-at-a-time)).
 /// * States are `'static` (they cannot borrow), because they are stored as `dyn Any`.
-/// * Triggers and their outputs are `'static` too (a trigger cannot carry `&str` or
-///   `&mut World`), because they are passed to the handlers type-erased, and `update` takes no
-///   input. Pass per-call data as owned trigger fields, or write it into the root with
+/// * Triggers and their outputs are `'static` too: they cannot hold non-`'static` borrows (a
+///   `&str` into a local `String`, a `&mut World`; a `&'static str` is fine), because they are
+///   passed to the handlers type-erased, and `update` takes no input. Pass per-call data as owned trigger fields, or write it into the root with
 ///   [`root_mut`](Self::root_mut) before [`update`](Self::update) and read it in the hooks with
 ///   [`ctx.ancestor()`](crate::context::Context::ancestor). See
 ///   [`Event`](crate::trigger::Event#triggers-cannot-borrow).
@@ -138,8 +206,11 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// * if a state with regions is registered with
     ///   [`child_explicit`](crate::definition::Region::child_explicit);
     /// * if a state registers the same trigger twice;
+    /// * if an `on_enter` hook requests a transition to a state that is not reachable through
+    ///   `define` ([`Context::transition`](crate::context::Context::transition)): the panic
+    ///   happens in that hook, while the chart is being entered;
     /// * if the `on_enter` hooks keep requesting transitions in a cycle (more than 10 000
-    ///   transitions in one batch).
+    ///   applied transitions in one batch).
     ///
     /// A panic in a hook propagates (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn new(root: R) -> Self {
@@ -164,16 +235,18 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     ///
     /// # Panics
     ///
-    /// If the `on_enter` hooks keep requesting transitions in a cycle (more than 10 000
-    /// transitions in one batch), or if a hook requests a transition to a state its parent does
-    /// not list ([`Context::transition`](crate::context::Context::transition)). A panic in a hook
-    /// propagates (see [Panics in hooks](Self#panics-in-hooks)).
+    /// * If a hook requests a transition to a state that is not reachable through `define`
+    ///   ([`Context::transition`](crate::context::Context::transition)). The panic happens in
+    ///   the requesting hook: in an `update` hook before anything changes, in an `on_enter`
+    ///   hook while the transitions are applied.
+    /// * If the `on_enter` hooks keep requesting transitions in a cycle (more than 10 000
+    ///   applied transitions in one batch), while the transitions are applied.
+    ///
+    /// A panic in a hook propagates (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn update(&mut self) {
         self.registry
             .enter_pending_root(&mut self.runtime, &mut self.root);
-        self.runtime.requests.clear();
-        self.registry
-            .update_node(&mut self.runtime, &mut self.root, &mut Nil);
+        self.registry.update_root(&mut self.runtime, &mut self.root);
         self.registry.run_batch(&mut self.runtime, &mut self.root);
     }
 
@@ -201,8 +274,14 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     ///
     /// # Panics
     ///
-    /// Like [`update`](Self::update), when the transitions requested by the handlers are
-    /// applied.
+    /// * If a handler requests a transition to a state that is not reachable through `define`
+    ///   ([`Context::transition`](crate::context::Context::transition)): the panic happens in
+    ///   that handler, during the dispatch, before any transition is applied.
+    /// * While the requested transitions are applied, like [`update`](Self::update): if an
+    ///   `on_enter` hook requests an unreachable state, or the `on_enter` hooks keep requesting
+    ///   transitions in a cycle (more than 10 000 applied transitions in one batch).
+    ///
+    /// A panic in a hook propagates (see [Panics in hooks](Self#panics-in-hooks)).
     pub fn trigger<E: Event>(&mut self, trigger: E) -> Result<E::Output, NotHandled> {
         match self.dispatch(trigger, Sink::First(None)) {
             Sink::First(Some(output)) => Ok(output),
@@ -218,8 +297,8 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     ///
     /// # Panics
     ///
-    /// Like [`update`](Self::update), when the transitions requested by the handlers are
-    /// applied.
+    /// Like [`trigger`](Self::trigger) (see its "Panics" section). A handler that requests an unreachable state
+    /// panics during the dispatch, so the outputs of the handlers that already ran are lost.
     pub fn trigger_all<E: Event>(&mut self, trigger: E) -> Result<Vec<E::Output>, NotHandled> {
         match self.dispatch(trigger, Sink::All(Vec::new())) {
             Sink::All(outputs) if !outputs.is_empty() => Ok(outputs),
@@ -232,11 +311,9 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     fn dispatch<E: Event>(&mut self, trigger: E, mut sink: Sink<E::Output>) -> Sink<E::Output> {
         self.registry
             .enter_pending_root(&mut self.runtime, &mut self.root);
-        self.runtime.requests.clear();
-        self.registry.dispatch(
+        self.registry.dispatch_root(
             &mut self.runtime,
             &mut self.root,
-            &mut Nil,
             &mut Dispatch {
                 event_ty: TypeId::of::<E>(),
                 event: &trigger,
@@ -261,6 +338,24 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// let chart = Statechart::new(Timer);
     /// chart.is_active::<Door_Open>(); // error: `Door_Open` is not a state of the `Timer` chart
     /// ```
+    ///
+    /// In generic code, write the bound as `T: InChart<R>` (see
+    /// [`InChart`](crate::state::InChart#generic-code)).
+    ///
+    /// The result must be used: a bare `chart.is_active::<T>();` checks nothing, so it is an
+    /// `unused_must_use` warning (an error under `-D warnings`), like the other queries
+    /// ([`state`](Self::state), [`root`](Self::root), [`get_debug_name`](Self::get_debug_name),
+    /// ...):
+    ///
+    /// ```compile_fail
+    /// # #![deny(unused_must_use)]
+    /// # use statechart::prelude::*;
+    /// #[derive(Debug)] struct Timer;
+    /// impl State for Timer { type Parent = NoParent; }
+    /// let chart = Statechart::new(Timer);
+    /// chart.is_active::<Timer>(); // error: unused return value; write `assert!(chart.is_active::<Timer>())`
+    /// ```
+    #[must_use]
     pub fn is_active<T: InChart<R>>(&self) -> bool {
         self.runtime.is_live(TypeId::of::<T>())
     }
@@ -279,6 +374,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// let chart = Statechart::new(Timer);
     /// chart.state::<Door_Open>(); // error: `Door_Open` belongs to the `Door` chart
     /// ```
+    #[must_use]
     pub fn state<T: InChart<R>>(&self) -> Option<&T> {
         self.registry
             .find_active(&self.root, TypeId::of::<T>())
@@ -300,6 +396,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// let mut chart = Statechart::new(Timer);
     /// chart.state_mut::<Door_Open>(); // error: `Door_Open` belongs to the `Door` chart
     /// ```
+    #[must_use]
     pub fn state_mut<T: InChart<R>>(&mut self) -> Option<&mut T> {
         self.registry
             .find_active_mut(&mut self.root, TypeId::of::<T>())
@@ -307,6 +404,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     }
 
     /// The root state's data.
+    #[must_use]
     pub fn root(&self) -> &R {
         self.root
             .state
@@ -316,6 +414,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     }
 
     /// The root state's data, mutably.
+    #[must_use]
     pub fn root_mut(&mut self) -> &mut R {
         self.root
             .state
@@ -328,6 +427,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// for a state with parallel regions. Each state prints with its own `Debug`. Same as
     /// `format!("{chart:?}")`. A region left without an active state by a panicking hook prints
     /// as `(empty)` (see [Panics in hooks](Self#panics-in-hooks)).
+    #[must_use]
     pub fn get_debug_name(&self) -> String {
         format!("{self:?}")
     }
@@ -335,6 +435,7 @@ impl<R: State<Parent = NoParent>> Statechart<R> {
     /// `TypeId`s of the active states except the root: deepest first within each branch,
     /// branches in region declaration order (a post-order walk, which is also the order
     /// `on_exit` runs in). For a single chain `A -> A_B -> A_B_C` this is `[A_B_C, A_B]`.
+    #[must_use]
     pub fn get_recursive_active_type_ids(&self) -> Vec<TypeId> {
         let mut out = Vec::new();
         self.root.collect_descendant_types(&mut out);

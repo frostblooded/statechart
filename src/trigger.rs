@@ -24,8 +24,35 @@ use std::fmt;
 ///
 /// # Triggers cannot borrow
 ///
-/// A trigger and its output are `'static`: they cannot hold references such as `&str` or
-/// `&mut World`, because the library passes them to the handlers type-erased (as `dyn Any`).
+/// A trigger and its output are `'static`: they cannot hold non-`'static` borrows, such as a
+/// `&str` into a local `String` or a `&mut World`, because the library passes them to the
+/// handlers type-erased (as `dyn Any`). `'static` references are fine, e.g. a string literal:
+///
+/// ```
+/// # use statechart::prelude::*;
+/// struct Say(&'static str);
+/// impl Event for Say {
+///     type Output = &'static str;
+/// }
+///
+/// #[derive(Debug)]
+/// struct Parrot;
+/// impl State for Parrot {
+///     type Parent = NoParent;
+///     fn define(def: &mut Definition<Self>) {
+///         def.trigger::<Say>();
+///     }
+/// }
+/// impl Trigger<Say> for Parrot {
+///     fn handle(&mut self, say: &Say, _: &mut Context<Self>) -> &'static str {
+///         say.0
+///     }
+/// }
+///
+/// let mut chart = Statechart::new(Parrot);
+/// assert_eq!(chart.trigger(Say("hello")), Ok("hello"));
+/// ```
+///
 /// `impl<'a> Event for Key<'a>` does not compile, and implementing it only for `Key<'static>`
 /// does not let a trigger carry a local borrow:
 ///

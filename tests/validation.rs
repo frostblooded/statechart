@@ -945,3 +945,371 @@ fn the_cycle_guard_counts_per_batch_not_per_chart() {
         assert_eq!(chart.root().remaining, 0);
     }
 }
+
+/// Requests that a panic discards, with targets that hold a resource.
+mod discarded {
+    use super::*;
+
+    // Root { mode } -> Root_A (initial) | Root_B { lock } | Root_C
+    //
+    // `Lock` logs "release <name>" when it is dropped. `mode` picks the hook that requests
+    // `Root_B { lock }` and then panics: "update" (Root_A's `update`) or "enter" (Root_C's
+    // `on_enter`, while the transition to Root_C is applied). Root_A's `Boom` handler always does
+    // it; its `GoToC` handler requests Root_C.
+
+    #[derive(Debug)]
+    pub struct Lock(pub &'static str);
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            common::log("release", self.0);
+        }
+    }
+
+    pub struct Boom;
+    impl Event for Boom {
+        type Output = ();
+    }
+
+    pub struct GoToC;
+    impl Event for GoToC {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Root {
+        pub mode: &'static str,
+    }
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>()
+                .child_explicit::<Root_B>()
+                .child_explicit::<Root_C>();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        fn define(def: &mut Definition<Self>) {
+            def.trigger::<Boom>().trigger::<GoToC>();
+        }
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            if ctx.parent().mode == "update" {
+                ctx.transition(Root_B {
+                    _lock: Lock("update"),
+                });
+                panic!("update panicked");
+            }
+        }
+    }
+    impl Trigger<Boom> for Root_A {
+        fn handle(&mut self, _: &Boom, ctx: &mut Context<Self>) {
+            ctx.transition(Root_B {
+                _lock: Lock("handler"),
+            });
+            panic!("handler panicked");
+        }
+    }
+    impl Trigger<GoToC> for Root_A {
+        fn handle(&mut self, _: &GoToC, ctx: &mut Context<Self>) {
+            ctx.transition(Root_C);
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Root_B {
+        pub _lock: Lock,
+    }
+    impl State for Root_B {
+        type Parent = Root;
+    }
+
+    #[derive(Debug)]
+    pub struct Root_C;
+    impl State for Root_C {
+        type Parent = Root;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            if ctx.parent().mode == "enter" {
+                ctx.transition(Root_B {
+                    _lock: Lock("enter"),
+                });
+                panic!("enter panicked");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_targets_of_requests_discarded_by_a_panic_are_dropped_while_it_unwinds() {
+    use discarded::*;
+    // A panic in `update`: the target requested before it is released before `catch_unwind`
+    // returns, not at the next operation.
+    let mut chart = Statechart::new(Root { mode: "update" });
+    assert!(catch_unwind(AssertUnwindSafe(|| chart.update())).is_err());
+    assert_eq!(take_log(), ["release update"]);
+    assert_eq!(
+        chart.get_debug_name(),
+        "Root { mode: \"update\" } -> Root_A"
+    );
+
+    // A panic in a trigger handler.
+    chart.root_mut().mode = "";
+    assert!(catch_unwind(AssertUnwindSafe(|| chart.trigger(Boom))).is_err());
+    assert_eq!(take_log(), ["release handler"]);
+    assert!(catch_unwind(AssertUnwindSafe(|| chart.trigger_all(Boom))).is_err());
+    assert_eq!(take_log(), ["release handler"]);
+    assert!(chart.is_active::<Root_A>());
+
+    // A panic in `on_enter` while a transition is applied: its request is part of the
+    // interrupted batch.
+    chart.root_mut().mode = "enter";
+    assert!(catch_unwind(AssertUnwindSafe(|| chart.trigger(GoToC))).is_err());
+    assert_eq!(take_log(), ["release enter"]);
+    assert_eq!(chart.get_debug_name(), "Root { mode: \"enter\" } -> Root_C");
+
+    // None of them is applied later.
+    chart.root_mut().mode = "";
+    chart.update();
+    assert_eq!(chart.get_debug_name(), "Root { mode: \"\" } -> Root_C");
+    assert!(take_log().is_empty());
+}
+
+/// Two requests in one batch; applying the first one panics (in Root_B's `on_enter`). The
+/// second one is "the rest of the batch".
+mod interrupted_batch {
+    use super::*;
+
+    // Root { boom }
+    // ├── region 0: Root_A (initial) | Root_B
+    // └── region 1: Root_P (initial) | Root_Q
+
+    pub struct Go;
+    impl Event for Go {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Root {
+        pub boom: bool,
+    }
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>().child::<Root_B>();
+            def.region::<Root_P>().child::<Root_Q>();
+            def.trigger::<Go>();
+        }
+    }
+    impl Trigger<Go> for Root {
+        fn handle(&mut self, _: &Go, ctx: &mut Context<Self>) {
+            ctx.transition(Root_B); // its on_enter panics while `boom`
+            ctx.transition(Root_Q); // still queued when that panic hits
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_B;
+    impl State for Root_B {
+        type Parent = Root;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            if ctx.parent().boom {
+                panic!("enter Root_B panicked");
+            }
+        }
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Root_A);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_P;
+    impl State for Root_P {
+        type Parent = Root;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_Q;
+    impl State for Root_Q {
+        type Parent = Root;
+    }
+}
+
+#[test]
+fn a_panic_while_a_batch_is_applied_discards_the_rest_of_the_batch_for_good() {
+    use interrupted_batch::*;
+    let mut chart = Statechart::new(Root { boom: true });
+    assert!(catch_unwind(AssertUnwindSafe(|| chart.trigger(Go))).is_err());
+    // Root_B counts as entered; the queued request for Root_Q was not applied.
+    assert_eq!(
+        chart.get_debug_name(),
+        "Root { boom: true } -> [Root_B, Root_P]"
+    );
+
+    // The next batch (Root_B's update requests Root_A) does not pick up the stale request,
+    // although its requester (the root) is still active.
+    chart.root_mut().boom = false;
+    chart.update();
+    assert_eq!(
+        chart.get_debug_name(),
+        "Root { boom: false } -> [Root_A, Root_P]"
+    );
+    assert!(!chart.is_active::<Root_Q>());
+}
+
+/// A restart interrupted by the old root's `on_exit` leaves the new root unentered. The next
+/// operation enters it, its `on_enter` requests Root_B, and exiting Root_A for that request
+/// panics.
+mod pending_root {
+    use super::*;
+
+    // Root { generation, mode } -> Root_A (initial) | Root_B
+
+    pub const LEAVE_A: &str = "request Root_B in on_enter; Root_A's on_exit panics";
+
+    pub struct Restart;
+    impl Event for Restart {
+        type Output = ();
+    }
+
+    #[derive(Debug)]
+    pub struct Root {
+        pub generation: u32,
+        pub mode: &'static str,
+    }
+    impl State for Root {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Root_A>().child::<Root_B>();
+            def.trigger::<Restart>();
+        }
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            if self.mode == LEAVE_A {
+                ctx.transition(Root_B);
+            }
+        }
+        fn on_exit(&mut self, _: &mut ExitContext<Self>) {
+            if self.mode == "panic in exit" {
+                panic!("exit Root panicked");
+            }
+        }
+    }
+    impl Trigger<Restart> for Root {
+        fn handle(&mut self, _: &Restart, ctx: &mut Context<Self>) {
+            ctx.transition(Root {
+                generation: self.generation + 1,
+                mode: "",
+            });
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_A;
+    impl State for Root_A {
+        type Parent = Root;
+        fn on_exit(&mut self, ctx: &mut ExitContext<Self>) {
+            if ctx.parent().mode == LEAVE_A {
+                panic!("exit Root_A panicked");
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Root_B;
+    impl State for Root_B {
+        type Parent = Root;
+    }
+}
+
+#[test]
+fn a_panic_in_the_batch_that_enters_a_root_left_unentered_keeps_is_active_in_sync() {
+    use pending_root::*;
+    let mut chart = Statechart::new(Root {
+        generation: 0,
+        mode: "panic in exit",
+    });
+    assert!(catch_unwind(AssertUnwindSafe(|| chart.trigger(Restart))).is_err());
+    chart.root_mut().mode = LEAVE_A;
+    assert!(catch_unwind(AssertUnwindSafe(|| chart.update())).is_err());
+    // Root_A was detached before its on_exit panicked, and Root_B was never entered.
+    assert_eq!(
+        chart.get_debug_name(),
+        format!("Root {{ generation: 1, mode: {LEAVE_A:?} }} -> (empty)")
+    );
+    assert!(chart.get_recursive_active_type_ids().is_empty());
+    assert!(chart.state::<Root_A>().is_none());
+    assert!(!chart.is_active::<Root_A>());
+    assert!(!chart.is_active::<Root_B>());
+}
+
+/// Like `counted_loop`, plus a request that is always dropped: `Loop_A::update` requests
+/// `Loop_B`, but `Loop::update` (which runs first) requests `Loop_A`, and applying that exits
+/// the `Loop_A` instance that made the second request.
+mod counted_with_a_dropped_request {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Loop {
+        pub remaining: u32,
+    }
+    impl State for Loop {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Loop_A>().child::<Loop_B>();
+        }
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Loop_A);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Loop_A;
+    impl State for Loop_A {
+        type Parent = Loop;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            if ctx.parent().remaining > 0 {
+                ctx.parent_mut().remaining -= 1;
+                ctx.transition(Loop_B);
+            }
+        }
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            ctx.transition(Loop_B); // always dropped
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Loop_B;
+    impl State for Loop_B {
+        type Parent = Loop;
+        fn on_enter(&mut self, ctx: &mut Context<Self>) {
+            if ctx.parent().remaining > 0 {
+                ctx.parent_mut().remaining -= 1;
+                ctx.transition(Loop_A);
+            }
+        }
+    }
+}
+
+#[test]
+fn dropped_requests_do_not_count_towards_the_cycle_guard() {
+    use counted_with_a_dropped_request::*;
+    let mut chart = Statechart::new(Loop { remaining: 0 });
+    // Loop_A again, then 9 999 more: 10 000 applied transitions and 1 dropped request.
+    chart.root_mut().remaining = 9_999;
+    chart.update();
+    assert_eq!(chart.root().remaining, 0);
+    assert!(chart.is_active::<Loop_B>());
+
+    // One more applied transition does trip the guard.
+    let mut chart = Statechart::new(Loop { remaining: 0 });
+    chart.root_mut().remaining = 10_000;
+    let panic = catch_unwind(AssertUnwindSafe(|| chart.update())).unwrap_err();
+    assert!(panic_message(panic).starts_with("more than 10000 transitions in one batch"));
+}

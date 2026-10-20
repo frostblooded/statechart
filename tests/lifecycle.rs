@@ -384,3 +384,62 @@ fn dropping_the_chart_drops_every_state_deepest_first_without_on_exit() {
     drop(chart);
     assert_eq!(take_log(), ["drop Root_A_X", "drop Root_A", "drop Root"]);
 }
+
+mod dropping_parallel {
+    use super::*;
+
+    // R -> [R_A, R_B -> R_B_1]: the earlier region is shallower than the later one. Every
+    // state logs its `Drop`.
+
+    macro_rules! logs_drop {
+        ($($state:ident),*) => {
+            $(impl Drop for $state {
+                fn drop(&mut self) {
+                    log("drop", stringify!($state));
+                }
+            })*
+        };
+    }
+    logs_drop!(R, R_A, R_B, R_B_1);
+
+    #[derive(Debug)]
+    pub struct R;
+    impl State for R {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<R_A>();
+            def.region::<R_B>();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_A;
+    impl State for R_A {
+        type Parent = R;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_B;
+    impl State for R_B {
+        type Parent = R;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<R_B_1>();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_B_1;
+    impl State for R_B_1 {
+        type Parent = R_B;
+    }
+}
+
+#[test]
+fn dropping_the_chart_drops_the_states_in_post_order() {
+    let chart = Statechart::new(dropping_parallel::R);
+    take_log();
+    drop(chart);
+    // Children before their parent, regions in declaration order: R_A (depth 1) is dropped
+    // before R_B_1 (depth 2).
+    assert_eq!(take_log(), ["drop R_A", "drop R_B_1", "drop R_B", "drop R"]);
+}

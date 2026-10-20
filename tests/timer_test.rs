@@ -139,3 +139,27 @@ fn test_timer_active_prints_the_remaining_time_in_seconds_to_a_tenth() {
     assert_eq!(active(999), "Timer_Active { remaining: 1.0s }");
     assert_eq!(active(400), "Timer_Active { remaining: 0.4s }");
 }
+
+/// While running, Timer_Active_Running answers GetRemaining itself with the live value; the
+/// fallback (Timer_Active's stored value, which only changes on update) is not asked.
+#[test]
+fn test_running_answers_get_remaining_with_the_live_value_not_the_fallback() {
+    let mut statechart = Statechart::new(Timer::new(LONG));
+    thread::sleep(Duration::from_millis(50));
+    // No update yet: Timer_Active still stores the full duration ...
+    assert_eq!(statechart.state::<Timer_Active>().unwrap().remaining, LONG);
+    // ... but Running takes off the time since its last tick.
+    assert!(statechart.trigger(GetRemaining).unwrap() <= LONG - Duration::from_millis(50));
+}
+
+/// Pause takes the time since the last update off `remaining` before pausing.
+#[test]
+fn test_pause_counts_the_time_since_the_last_update() {
+    let mut statechart = Statechart::new(Timer::new(LONG));
+    thread::sleep(Duration::from_millis(50));
+    statechart.trigger(Pause).unwrap();
+    assert!(statechart.is_active::<Timer_Active_Paused>());
+    assert!(
+        statechart.state::<Timer_Active>().unwrap().remaining <= LONG - Duration::from_millis(50)
+    );
+}

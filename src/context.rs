@@ -76,14 +76,86 @@ use std::marker::PhantomData;
 ///     }
 /// }
 /// ```
+///
+/// # One mutable borrow at a time
+///
+/// A reference from [`parent_mut`](Self::parent_mut) or [`ancestor_mut`](Self::ancestor_mut)
+/// borrows the whole context mutably, so only one ancestor can be borrowed mutably at a time.
+/// While that reference is alive, the context cannot be used for anything else: not for
+/// another ancestor (mutable or not), not for [`is_active`](Self::is_active), not for
+/// [`transition`](Self::transition). Use the accessors one after the other, reading what you
+/// need into locals first:
+///
+/// ```
+/// # #![allow(non_camel_case_types)]
+/// # use statechart::prelude::*;
+/// #[derive(Debug)]
+/// struct Game {
+///     level: u32,
+/// }
+/// impl State for Game {
+///     type Parent = NoParent;
+///     fn define(def: &mut Definition<Self>) {
+///         def.region::<Game_Play>();
+///     }
+/// }
+///
+/// #[derive(Debug, Default)]
+/// struct Game_Play {
+///     level: u32,
+/// }
+/// impl State for Game_Play {
+///     type Parent = Game;
+///     fn define(def: &mut Definition<Self>) {
+///         def.region::<Game_Play_Boss>();
+///     }
+/// }
+///
+/// #[derive(Debug, Default)]
+/// struct Game_Play_Boss;
+/// impl State for Game_Play_Boss {
+///     type Parent = Game_Play;
+///     fn update(&mut self, ctx: &mut Context<Self>) {
+///         let level = ctx.ancestor::<Game>().unwrap().level; // read the grandparent ...
+///         ctx.parent_mut().level = level; // ... then change the parent
+///     }
+/// }
+///
+/// let mut chart = Statechart::new(Game { level: 3 });
+/// chart.update();
+/// assert_eq!(chart.state::<Game_Play>().unwrap().level, 3);
+/// ```
+///
+/// Holding the parent while reading the grandparent does not compile:
+///
+/// ```compile_fail,E0502
+/// # #![allow(non_camel_case_types)]
+/// # use statechart::prelude::*;
+/// # #[derive(Debug)] struct Game { level: u32 }
+/// # impl State for Game { type Parent = NoParent; fn define(d: &mut Definition<Self>) { d.region::<Game_Play>(); } }
+/// # #[derive(Debug, Default)] struct Game_Play { level: u32 }
+/// # impl State for Game_Play { type Parent = Game; fn define(d: &mut Definition<Self>) { d.region::<Game_Play_Boss>(); } }
+/// #[derive(Debug, Default)]
+/// struct Game_Play_Boss;
+/// impl State for Game_Play_Boss {
+///     type Parent = Game_Play;
+///     fn update(&mut self, ctx: &mut Context<Self>) {
+///         let play = ctx.parent_mut();
+///         play.level = ctx.ancestor::<Game>().unwrap().level; // error: `*ctx` is already borrowed as mutable
+///     }
+/// }
+/// ```
 pub struct Context<'a, S> {
     hook: Hook<'a>,
     _state: PhantomData<fn() -> S>,
 }
 
 /// What `on_exit` of state `S` can see: the same ancestor access as [`Context`], but no
-/// `transition`. A state that is being exited cannot request a transition (it would always be
-/// dropped), so the method does not exist:
+/// `transition`. The same borrowing rule applies: only one ancestor can be borrowed mutably at
+/// a time (see [`Context`](Context#one-mutable-borrow-at-a-time)).
+///
+/// A state that is being exited cannot request a transition (it would always be dropped), so
+/// the method does not exist:
 ///
 /// ```compile_fail,E0599
 /// # use statechart::prelude::*;
@@ -156,6 +228,7 @@ macro_rules! ancestor_access {
         /// # impl State for Timer_Elapsed { type Parent = Timer; fn update(&mut self, ctx: &mut Context<Self>) { assert_eq!(parent_name(ctx), "Timer"); } }
         /// # Statechart::new(Timer).update();
         /// ```
+        #[must_use]
         pub fn parent(&self) -> &S::Parent
         where
             S::Parent: ParentState,
@@ -170,6 +243,7 @@ macro_rules! ancestor_access {
         /// The direct parent's data, mutably. Statically typed; the root does not have this
         /// method. In generic code over `S: State`, call it under `where S::Parent: State` (see
         /// [`parent`](Self::parent)).
+        #[must_use]
         pub fn parent_mut(&mut self) -> &mut S::Parent
         where
             S::Parent: ParentState,
@@ -184,6 +258,7 @@ macro_rules! ancestor_access {
         /// The active ancestor of type `A`, at any depth, or `None` if `A` is not an ancestor of
         /// `S`. States in other regions (siblings, cousins) are not ancestors, and neither is
         /// `S` itself.
+        #[must_use]
         pub fn ancestor<A: State>(&self) -> Option<&A> {
             self.hook
                 .anc
@@ -192,6 +267,7 @@ macro_rules! ancestor_access {
         }
 
         /// Mutable version of [`ancestor`](Self::ancestor).
+        #[must_use]
         pub fn ancestor_mut<A: State>(&mut self) -> Option<&mut A> {
             self.hook
                 .anc
@@ -223,6 +299,25 @@ macro_rules! ancestor_access {
         ///     }
         /// }
         /// ```
+        ///
+        /// In generic code over `S: State`, write the bound as `T: InChart<RootOf<S>>` (see
+        /// [`InChart`](crate::state::InChart#generic-code)).
+        ///
+        /// The result must be used (`unused_must_use`), like the other accessors:
+        ///
+        /// ```compile_fail
+        /// # #![deny(unused_must_use)]
+        /// # use statechart::prelude::*;
+        /// #[derive(Debug)]
+        /// struct Timer;
+        /// impl State for Timer {
+        ///     type Parent = NoParent;
+        ///     fn update(&mut self, ctx: &mut Context<Self>) {
+        ///         ctx.is_active::<Timer>(); // error: unused return value
+        ///     }
+        /// }
+        /// ```
+        #[must_use]
         pub fn is_active<T: InChart<RootOf<S>>>(&self) -> bool {
             self.hook.rt.is_live(TypeId::of::<T>())
         }
@@ -250,7 +345,9 @@ impl<'a, S: State> Context<'a, S> {
     /// state itself: its parent is then the LCA, and the parallel state is exited and entered
     /// again with all of its regions.
     ///
-    /// Only states of the same chart are accepted:
+    /// Only states of the same chart are accepted (in generic code over `S: State`, write the
+    /// bound as `T: InChart<RootOf<S>>`; see
+    /// [`InChart`](crate::state::InChart#generic-code)):
     ///
     /// ```compile_fail,E0277
     /// # #![allow(non_camel_case_types)]

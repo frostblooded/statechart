@@ -192,3 +192,59 @@ fn root_data_is_reachable_from_outside_the_chart() {
     assert_eq!(chart.trigger(Bump), Ok(42));
     assert_eq!(chart.root().counter, 42);
 }
+
+/// `ancestor` / `ancestor_mut` have no `InChart` bound (unlike `is_active` and `transition`):
+/// generic helpers can call them, and any type that is not an active ancestor, including a
+/// state of another chart, is `None`.
+mod unbounded {
+    use super::*;
+
+    /// The root of another chart.
+    #[derive(Debug)]
+    pub struct Door;
+    impl State for Door {
+        type Parent = NoParent;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Counter {
+        pub count: u32,
+    }
+    impl State for Counter {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<Counter_Leaf>();
+        }
+    }
+
+    /// Works in the hooks of any state `S`, of any chart.
+    pub fn bump_counter<S: State>(ctx: &mut Context<S>) -> bool {
+        match ctx.ancestor_mut::<Counter>() {
+            Some(counter) => {
+                counter.count += 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Counter_Leaf;
+    impl State for Counter_Leaf {
+        type Parent = Counter;
+        fn update(&mut self, ctx: &mut Context<Self>) {
+            assert!(bump_counter(ctx));
+            assert!(ctx.ancestor::<Door>().is_none());
+            assert!(ctx.ancestor_mut::<Door>().is_none());
+        }
+    }
+}
+
+#[test]
+fn ancestor_works_in_generic_helpers_and_is_none_for_a_state_of_another_chart() {
+    use unbounded::*;
+    let mut chart = Statechart::new(Counter::default());
+    chart.update();
+    assert_eq!(chart.root().count, 1);
+    assert_eq!(Statechart::new(Door).get_debug_name(), "Door");
+}

@@ -185,3 +185,55 @@ fn state_mut_changes_the_data_of_an_active_state() {
     let mut robot = Statechart::new(robot::Robot);
     assert!(robot.state_mut::<robot::Robot_Body_Arms>().is_some());
 }
+
+mod uneven {
+    use super::*;
+
+    // R -> [R_A, R_B -> R_B_1]: the earlier region is shallower than the later one.
+
+    #[derive(Debug)]
+    pub struct R;
+    impl State for R {
+        type Parent = NoParent;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<R_A>();
+            def.region::<R_B>();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_A;
+    impl State for R_A {
+        type Parent = R;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_B;
+    impl State for R_B {
+        type Parent = R;
+        fn define(def: &mut Definition<Self>) {
+            def.region::<R_B_1>();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct R_B_1;
+    impl State for R_B_1 {
+        type Parent = R_B;
+    }
+}
+
+#[test]
+fn active_type_ids_are_post_order_not_sorted_by_depth() {
+    use uneven::*;
+    let chart = Statechart::new(R);
+    // R_A (depth 1) comes before R_B_1 (depth 2): deepest first only within a branch.
+    assert_eq!(
+        chart.get_recursive_active_type_ids(),
+        vec![
+            TypeId::of::<R_A>(),
+            TypeId::of::<R_B_1>(),
+            TypeId::of::<R_B>()
+        ]
+    );
+}
