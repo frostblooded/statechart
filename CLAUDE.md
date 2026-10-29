@@ -34,7 +34,7 @@ cargo fmt --all --check
 cargo build && python3 scripts/check_compile_fail.py .   # optional: each compile_fail doctest fails with its listed error code (finds the build through `cargo metadata`, so CARGO_TARGET_DIR works)
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy, `cargo test --all-targets`, `cargo test --doc` and `cargo test --release --all-targets`, all with `RUSTFLAGS=-D warnings`. The release run is what tells `assert!` from `debug_assert!`, so it is the only guard for user decision D1 (the duplicate-state check fires in every build).
+CI (`.github/workflows/ci.yml`) runs fmt, clippy, `cargo test --all-targets`, `cargo test --doc` and `cargo test --release --all-targets`, all with `RUSTFLAGS=-D warnings`. It skips PRs and pushes that only change Markdown files (`paths-ignore: ['**.md']`), a newer push to a PR cancels that PR's older run, and only master saves the `rust-cache` cache (PRs restore it). The release run is what tells `assert!` from `debug_assert!`, so it is the only guard for user decision D1 (the duplicate-state check fires in every build).
 
 Test files in `tests/` (shared helpers, such as the per-thread event log, are in `tests/common/mod.rs`); the only unit tests are `src/engine/tests.rs`, which test `Engine`'s interface:
 
